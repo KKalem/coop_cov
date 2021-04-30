@@ -278,6 +278,13 @@ class PoseGraphOptimization(g2o.SparseOptimizer):
 
         return self.get_pose(id).vector()
 
+    def pose_is_fixed(self, id):
+        v = self.vertex(id)
+        if v is None:
+            return None
+
+        return v.fixed()
+
     def get_all_poses(self, id_list=None):
         # id_list can be a filter to only get verts in that list
         poses = []
@@ -375,6 +382,8 @@ class PoseGraph(object):
 
         # keep track of which poses are _ours_
         self.own_pose_ids = []
+        # keep track of which poses were ever fixed
+        self.fixed_pose_ids = []
         # independent of the PGOs, keep a trace of poses after corrections
         self.corrected_pose_trace = {}
         # and before corrections too
@@ -393,6 +402,7 @@ class PoseGraph(object):
         # keep a pose_id -> [edges] mapping so that we can add those edges
         # when we hear about this pose from another PG
         self.pose_edges = {}
+
 
 
     def log(self, *args):
@@ -417,6 +427,8 @@ class PoseGraph(object):
             # fix this one
             self.pgo.add_vertex(pose_id, pose, fixed=True)
             self.own_pose_ids.append(pose_id)
+            self.log(f"First pose in the graph = {pose_id}@{pose}")
+            self.fixed_pose_ids.append(pose_id)
         else:
             # there is a previous pose we should make an edge with
             # check if the new pose is too close to the previous one
@@ -452,12 +464,39 @@ class PoseGraph(object):
         return poses
 
     @property
+    def fixed_poses(self):
+        poses = []
+        for pid in self.fixed_pose_ids:
+            p = self.pose_from_pid(pid)
+            if p is not None:
+                poses.append(p)
+
+        return poses
+
+
+    @property
     def all_edges(self):
         all_edges = []
         for pid, edges in self.pose_edges.items():
             for edge in edges:
-                all_edges.append(edge['poses'])
+                pid1, pid2 = edge['vertices']
+                p1 = self.pose_from_pid(pid1)
+                p2 = self.pose_from_pid(pid2)
+                all_edges.append((p1,p2))
         return all_edges
+
+
+    def pose_from_pid(self, pid):
+        p = self.corrected_pose_trace.get(pid)
+        if p is not None:
+            return p
+
+        p = self.raw_pose_trace.get(pid)
+        if p is not None:
+            return p
+
+        p = self.pgo.get_pose_array(pid) 
+        return p
 
 
     def optimize(self):
@@ -474,14 +513,15 @@ class PoseGraph(object):
         # and re-create a fresh pgo
         self.corrected_pose_trace.update(self.pgo.get_all_poses_dict(id_list=self.own_pose_ids))
         self.raw_pose_trace = {}
-        self.pgo = PoseGraphOptimization(pgo_id = self.pgo_id)
+        #TODO uncomment once debugged
+        # self.pgo = PoseGraphOptimization(pgo_id = self.pgo_id)
         self.poses_since_last_optimization = 0
 
 
     def provide_pose_to_other(self, pid):
         # return a pose from our own current raw poses only
-        # a function instead of direct access in case i wanna filter later
-        return self.pgo.get_pose_array(pid)
+        # also return if this pose is fixed
+        return self.pgo.get_pose_array(pid), self.pgo.pose_is_fixed(pid)
 
 
     def search_edges_from_pose_id(self, pid, target_pid=None, num_edges=None):
@@ -543,6 +583,14 @@ class PoseGraph(object):
         return all_edges
 
 
+    def communicate_with_other(self,
+                               other_pg):
+        # get the vertices
+        self._collect_poses_from_other(other_pg)
+        # get the edges
+        self._add_past_edges_of_other(other_pg)
+        # remember the last vertex we touched this pg
+        self.other_last_pose_ids[other_pg.pgo_id] = other_pg.last_pose_id
 
 
     def _collect_poses_from_other(self, other_pg):
@@ -556,10 +604,15 @@ class PoseGraph(object):
         # poses, or we reach the last known pose id from before
         # effectively fill in the missing info between now and past
         # yes there are 'empty' slots here, i dont care
-        for pid in reversed(range(other_last_id, other_pg.last_pose_id)):
-            new_pose = other_pg.provide_pose_to_other(pid)
+        # with some extras too, just to _make sure_ that we get the latest of all
+        pid_list = list(reversed(range(other_last_id-10, other_pg.last_pose_id+10)))
+        added_pids = []
+        for pid in pid_list:
+            new_pose, fixed = other_pg.provide_pose_to_other(pid)
             if new_pose is not None:
-                self.pgo.add_vertex(pid, new_pose)
+                self.pgo.add_vertex(pid, new_pose, fixed)
+                added_pids.append(pid)
+
 
 
     def _add_past_edges_of_other(self, other_pg):
@@ -582,37 +635,19 @@ class PoseGraph(object):
             self.add_edge_between_poses(edge)
 
 
-    def communicate_with_other(self,
-                               other_pg):
-        self._collect_poses_from_other(other_pg)
-        self._add_past_edges_of_other(other_pg)
-
-        self.other_last_pose_ids[other_pg.pgo_id] = other_pg.last_pose_id
-
 
     def measure_other_agent(self,
                             self_pose,
                             other_pose,
                             other_pg):
 
-        self.add_new_edge_between_poses(self_pose = self_pose,
-                                        self_pose_id = self.last_pose_id,
-                                        other_pose = other_pose,
-                                        other_pose_id = other_pg.last_pose_id,
-                                        information = [10., 10., 10.])
-
-
-    def add_edge_between_poses(self, edge):
-        pid1, pid2 = edge['vertices']
-
-        for pid in (pid1, pid2):
-            if self.pose_edges.get(pid) is None:
-                self.pose_edges[pid] = []
-
-        self.pose_edges[pid1].append(edge)
-
-        self.pgo.add_edge(**edge)
-
+        success = self.add_new_edge_between_poses(self_pose = self_pose,
+                                                  self_pose_id = self.last_pose_id,
+                                                  other_pose = other_pose,
+                                                  other_pose_id = other_pg.last_pose_id,
+                                                  information = [10., 10., 10.])
+        if not success:
+            self.log("Could not measure {other_pg.pgo_id}!")
 
 
     def add_new_edge_between_poses(self,
@@ -632,7 +667,28 @@ class PoseGraph(object):
                 'eid':edge_id,
                 'information':information}
 
-        self.add_edge_between_poses(edge)
+        success = self.add_edge_between_poses(edge)
+
+        return success
+
+
+    def add_edge_between_poses(self, edge):
+        pid1, pid2 = edge['vertices']
+
+        for pid in (pid1, pid2):
+            if self.pose_edges.get(pid) is None:
+                self.pose_edges[pid] = []
+
+            if self.pgo.vertex(pid) is None:
+                return False
+
+        self.pose_edges[pid1].append(edge)
+
+        self.pgo.add_edge(**edge)
+        return True
+
+
+
 
 
 
@@ -675,6 +731,16 @@ if __name__=='__main__':
     pg1 = PoseGraph(pgo_id = 1,
                     pgo_id_store = id_store)
 
+
+    def interact():
+        dist = geom.euclid_distance(auv.pose[:2], auv1.pose[:2])
+        if dist < 20:
+            pg.communicate_with_other(pg1)
+            pg.measure_other_agent(auv.pose,
+                                         auv1.pose,
+                                         pg1)
+
+
     auv.set_target([-5,20])
     auv1.set_target([5,20])
 
@@ -686,6 +752,8 @@ if __name__=='__main__':
         pg1.append_pose(auv1.pose)
         if auv.reached_target:
             break
+
+        interact()
 
 
     auv.set_target([-5,40])
@@ -700,12 +768,8 @@ if __name__=='__main__':
         if auv.reached_target:
             break
 
-        dist = geom.euclid_distance(auv.pose[:2], auv1.pose[:2])
-        if dist < 20:
-            pg.communicate_with_other(pg1)
-            pg.measure_other_agent(auv.pose,
-                                         auv1.pose,
-                                         pg1)
+        interact()
+
 
     auv.set_target([-20,50])
     auv1.set_target([20,50])
@@ -719,6 +783,8 @@ if __name__=='__main__':
         if auv.reached_target:
             break
 
+        interact()
+
     auv.set_target([0,0])
     auv1.set_target([0,0])
 
@@ -731,33 +797,26 @@ if __name__=='__main__':
         if auv.reached_target:
             break
 
-        dist = geom.euclid_distance(auv.pose[:2], auv1.pose[:2])
-        if dist < 20:
-            pg.communicate_with_other(pg1)
-            pg.measure_other_agent(auv.pose,
-                                         auv1.pose,
-                                         pg1)
+        interact()
 
+    pg.pgo.save('test.g2o')
     pg.optimize()
 
 
     auv_trace = np.array(auv.pose_trace)
     pg_trace = np.array(pg.pose_trace)
-    plt.scatter(auv_trace[:,0], auv_trace[:,1], c='g', alpha=0.2, marker='.')
+    plt.plot(auv_trace[:,0], auv_trace[:,1], c='g', alpha=0.2)
     plt.scatter(pg_trace[:,0], pg_trace[:,1], c='g', alpha=0.2, marker='+')
 
-    # all_pgo = pg.pgo.get_all_poses()
-    # plt.scatter(all_pgo[:,0], all_pgo[:,1], c='g', alpha=0.2, marker='o')
 
     for p1,p2 in pg.all_edges:
         plt.plot((p1[0], p2[0]), (p1[1], p2[1]), c='g', alpha=0.6)
 
-    # auv_trace = np.array(auv1.pose_trace)
     pg_trace = np.array(pg1.pose_trace)
-    # plt.scatter(auv_trace[:,0], auv_trace[:,1], c='b', alpha=0.7)
-    plt.scatter(pg_trace[:,0], pg_trace[:,1], c='b', alpha=0.2, marker='+')
+    plt.plot(pg_trace[:,0], pg_trace[:,1], c='b', alpha=0.2)
 
 
     plt.axis('equal')
+
 
 
