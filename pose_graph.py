@@ -711,9 +711,15 @@ if __name__=='__main__':
 
     target_threshold = 1
 
+    left = -20
+    right = 20
+    mid = 5
+    mid_left = -45
+    up = 20
+
     from auv import AUV
     auv = AUV(auv_id=0,
-              init_pos = [-20,0],
+              init_pos = [left,0],
               init_heading = 0,
               target_threshold=target_threshold)
 
@@ -723,12 +729,21 @@ if __name__=='__main__':
 
 
     auv1 = AUV(auv_id=1,
-               init_pos = [20,0],
+               init_pos = [right,0],
                init_heading = 0,
                target_threshold=target_threshold)
 
 
     pg1 = PoseGraph(pgo_id = 1,
+                    pgo_id_store = id_store)
+
+    auv2 = AUV(auv_id=2,
+               init_pos = [left-5,0],
+               init_heading = 0,
+               target_threshold=target_threshold)
+
+
+    pg2 = PoseGraph(pgo_id = 2,
                     pgo_id_store = id_store)
 
 
@@ -737,67 +752,66 @@ if __name__=='__main__':
         if dist < 20:
             pg.communicate_with_other(pg1)
             pg.measure_other_agent(auv.pose,
-                                         auv1.pose,
-                                         pg1)
+                                   auv1.pose,
+                                   pg1)
+
+        dist = geom.euclid_distance(auv.pose[:2], auv2.pose[:2])
+        if dist < 20:
+            pg.communicate_with_other(pg2)
+            pg.measure_other_agent(auv.pose,
+                                   auv2.pose,
+                                   pg2)
+
+    drift = 0
+    def run(ticks):
+        global drift
+        for i in range(ticks):
+            auv.update(dt=0.5)
+            auv1.update(dt=0.5)
+            auv2.update(dt=0.5)
+
+            p = np.array(auv.pose) + [drift, 0, 0]
+            drift += 0.05
+            pg.append_pose(p)
+            pg1.append_pose(auv1.pose)
+            pg2.append_pose(auv2.pose)
+
+            if auv.reached_target:
+                break
+
+            interact()
+
+    cup = 0
+    def hook():
+        global cup
+        auv.set_target([-mid,cup])
+        auv1.set_target([mid,cup])
+        auv2.set_target([mid_left, cup])
+        run(100)
+
+        cup += up
+
+        auv.set_target([-mid,cup])
+        auv1.set_target([mid,cup])
+        auv2.set_target([mid_left,cup])
+        run(100)
+
+        auv.set_target([left,cup])
+        auv1.set_target([right,cup])
+        auv2.set_target([left-10,cup])
+        run(100)
+
+        cup += up
+
+        auv.set_target([left,cup])
+        auv1.set_target([right,cup])
+        auv2.set_target([left-10,cup])
+        run(100)
 
 
-    auv.set_target([-5,20])
-    auv1.set_target([5,20])
+    for i in range(4):
+        hook()
 
-    for i in range(100):
-        auv.update(dt=0.5)
-        auv1.update(dt=0.5)
-        p = np.array(auv.pose) + [i*0.1, 0, 0]
-        pg.append_pose(p)
-        pg1.append_pose(auv1.pose)
-        if auv.reached_target:
-            break
-
-        interact()
-
-
-    auv.set_target([-5,40])
-    auv1.set_target([5,40])
-
-    for i in range(100):
-        auv.update(dt=0.5)
-        auv1.update(dt=0.5)
-        p = np.array(auv.pose) + [-i*0.1, 1, 0]
-        pg.append_pose(p)
-        pg1.append_pose(auv1.pose)
-        if auv.reached_target:
-            break
-
-        interact()
-
-
-    auv.set_target([-20,50])
-    auv1.set_target([20,50])
-
-    for i in range(100):
-        auv.update(dt=0.5)
-        auv1.update(dt=0.5)
-        p = np.array(auv.pose) + [-i*0.1, 1, 0]
-        pg.append_pose(p)
-        pg1.append_pose(auv1.pose)
-        if auv.reached_target:
-            break
-
-        interact()
-
-    auv.set_target([0,0])
-    auv1.set_target([0,0])
-
-    for i in range(100):
-        auv.update(dt=0.5)
-        auv1.update(dt=0.5)
-        p = np.array(auv.pose) + [-i*0.1, 1, 0]
-        pg.append_pose(p)
-        pg1.append_pose(auv1.pose)
-        if auv.reached_target:
-            break
-
-        interact()
 
     pg.pgo.save('test.g2o')
     pg.optimize()
@@ -814,6 +828,8 @@ if __name__=='__main__':
 
     pg_trace = np.array(pg1.pose_trace)
     plt.plot(pg_trace[:,0], pg_trace[:,1], c='b', alpha=0.2)
+    pg_trace = np.array(pg2.pose_trace)
+    plt.plot(pg_trace[:,0], pg_trace[:,1], c='r', alpha=0.2)
 
 
     plt.axis('equal')
