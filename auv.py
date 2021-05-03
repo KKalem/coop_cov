@@ -38,7 +38,7 @@ class AUV(object):
         self.auv_length = auv_length
         self.max_turn_angle = max_turn_angle
 
-        self.pose_trace = []
+        self._pose_trace = []
         self.pose = [self.pos[0], self.pos[1], self.heading]
 
         self.reached_target = False
@@ -50,19 +50,23 @@ class AUV(object):
         return f'[auv:{self.auv_id}@{self.pose}]'
 
     def log(self, *args):
-        print(f'[auv:{self.auv_id}]\t{args}')
+        print(f'[AUV:{self.auv_id}]\t{args}')
+
+    @property
+    def pose_trace(self):
+        return np.array(self._pose_trace)
 
     @property
     def heading_vec(self):
         return np.array((np.cos(self.heading),np.sin(self.heading)))
 
     def _get_turn_direction(self):
+        if self.target_pos is None:
+            return None, 0
+
         diff = self.target_pos - self.pos
         if abs(diff[0]) <= self.target_threshold and abs(diff[1]) <= self.target_threshold:
             self.reached_target = True
-
-        if self.reached_target:
-            return None, 0
 
         angle_to_target = geom.vec2_directed_angle(self.heading_vec, diff)
         turn_direction = np.sign(angle_to_target)
@@ -70,16 +74,29 @@ class AUV(object):
         return turn_direction, angle_to_target
 
 
-    def _move(self, dt, drift_x=0., drift_y=0., drift_heading=0.):
+    def _move(self,
+              dt,
+              turn_direction=None,
+              turn_amount=None,
+              drift_x=0.,
+              drift_y=0.,
+              drift_heading=0.):
         """
         moves the auv which is modeled as a bicycle
         drifts are meters per second and radians per second
         """
-        turn_direction, turn_amount = self._get_turn_direction()
+        # if these arent given, run autonomously
+        if turn_direction is None or turn_amount is None:
+            if self.reached_target:
+                turn_direction = None
+            else:
+                turn_direction, turn_amount = self._get_turn_direction()
 
-        if turn_direction is None or dt==0.:
-            # we dont want to move apparently.
-            return
+            if turn_direction is None or dt==0.:
+                # we dont want to move apparently.
+                return None, 0
+
+        # if they ARE given, just execute them
 
         max_turn = np.deg2rad(self.max_turn_angle)
         steering_angle = turn_direction * min(max_turn, abs(turn_amount))
@@ -103,6 +120,7 @@ class AUV(object):
         self.pos += [dx,dy]
         self.pos += [drift_x, drift_y]
         self.set_heading(self.heading + dh + drift_heading)
+        return turn_direction, turn_amount
 
 
     def set_heading(self, heading):
@@ -121,17 +139,42 @@ class AUV(object):
         self.pose[0] = pos[0]
         self.pose[1] = pos[1]
 
+    def set_pose(self, pose):
+        self.set_position(pose[:2])
+        self.set_heading(pose[2])
+
 
     def set_target(self, target_pos):
-        self.reached_target = False
-        self.target_pos = np.array(target_pos)
+        if target_pos is None:
+            self.reached_target = True
+        else:
+            self.reached_target = False
+            self.target_pos = np.array(target_pos)
 
 
-
+    def coverage_polygon(self, swath):
+        # create a vector for each side of the swath
+        # stack it up for each pose in the trace
+        # then rotate this vector with heading of pose trace
+        # and then displace it with pose trace position
+        t = self.pose_trace
+        len_trace = len(t)
+        right_swath = np.array([[0,-swath/2]]*len_trace)
+        left_swath = np.array([[0,swath/2]]*len_trace)
+        left_swath = geom.vec2_rotate(left_swath, t[:,2])
+        right_swath = geom.vec2_rotate(right_swath, t[:,2])
+        left_swath[:,0] += t[:,0]
+        left_swath[:,1] += t[:,1]
+        right_swath[:,0] += t[:,0]
+        right_swath[:,1] += t[:,1]
+        poly = np.vstack((right_swath, np.flip(left_swath, axis=0)))
+        return poly
 
 
     def update(self,
                dt,
+               turn_direction = None,
+               turn_amount = None,
                drift_x = 0.,
                drift_y = 0.,
                drift_heading = 0.
@@ -143,13 +186,17 @@ class AUV(object):
         drifts are m/s and radians
         """
 
-        dh = self._move(dt,
-                        drift_x,
-                        drift_y,
-                        drift_heading)
+        td, tu = self._move(dt,
+                            turn_direction,
+                            turn_amount,
+                            drift_x,
+                            drift_y,
+                            drift_heading)
 
         self.pose = [self.pos[0], self.pos[1], self.heading]
-        self.pose_trace.append(self.pose)
+        self._pose_trace.append(self.pose)
+
+        return td, tu
 
 
 
@@ -178,9 +225,18 @@ if __name__ == '__main__':
     except:
         pass
 
-    pt = np.array(auv.pose_trace)
-    plt.plot(pt[:,0], pt[:,1])
+    pt = auv.pose_trace
+    fig, ax = plt.subplots(1,1)
     plt.axis('equal')
+    ax.plot(pt[:,0], pt[:,1])
+
+    from matplotlib.patches import Polygon
+
+    poly = auv.coverage_polygon(swath=5)
+    p = Polygon(xy=poly, closed=True, alpha=0.1)
+    ax.scatter(poly[:,0], poly[:,1], alpha=0.1)
+    ax.add_artist(p)
+
 
 
 

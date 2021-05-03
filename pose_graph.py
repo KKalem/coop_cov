@@ -408,7 +408,7 @@ class PoseGraph(object):
     def log(self, *args):
         if len(args) == 1:
             args = args[0]
-        print(f'[pgo_id:{self.pgo_id}]\t{args}')
+        print(f'[PG:{self.pgo_id}]\t{args}')
 
 
     def append_pose(self,
@@ -482,7 +482,7 @@ class PoseGraph(object):
                 pid1, pid2 = edge['vertices']
                 p1 = self.pose_from_pid(pid1)
                 p2 = self.pose_from_pid(pid2)
-                all_edges.append((p1,p2))
+                all_edges.append((p1[:2],p2[:2]))
         return all_edges
 
 
@@ -495,13 +495,12 @@ class PoseGraph(object):
         if p is not None:
             return p
 
-        p = self.pgo.get_pose_array(pid) 
+        p = self.pgo.get_pose_array(pid)
         return p
 
 
     def optimize(self):
         if self.poses_since_last_optimization <= self.min_poses_between_optims:
-            self.log(f'Not enough poses yet:{self.poses_since_last_optimization}/{self.min_poses_between_optims}')
             return False
 
         success = self.pgo.optimize(max_iterations=200)
@@ -605,6 +604,10 @@ class PoseGraph(object):
         # effectively fill in the missing info between now and past
         # yes there are 'empty' slots here, i dont care
         # with some extras too, just to _make sure_ that we get the latest of all
+        if other_pg.last_pose_id is None:
+            self.log(f"{other_pg.pgo_id}'s lsat_pose_id is None, can't collect poses from it!")
+            return
+
         pid_list = list(reversed(range(other_last_id-10, other_pg.last_pose_id+10)))
         added_pids = []
         for pid in pid_list:
@@ -628,6 +631,10 @@ class PoseGraph(object):
         if past_pose_id == other_pg.last_pose_id:
             return
 
+        if other_pg.last_pose_id is None:
+            self.log(f"{other_pg.pgo_id}'s last_pose_id is None, cant add past edges from it!")
+            return
+
         edges, success = other_pg.search_edges_from_pose_id(pid = past_pose_id,
                                                             target_pid = other_pg.last_pose_id)
 
@@ -641,13 +648,16 @@ class PoseGraph(object):
                             other_pose,
                             other_pg):
 
+        if other_pg.last_pose_id is None:
+            self.log(f"{other_pg.pgo_id}'s last_pose_id is None, cant measure it!")
+
         success = self.add_new_edge_between_poses(self_pose = self_pose,
                                                   self_pose_id = self.last_pose_id,
                                                   other_pose = other_pose,
                                                   other_pose_id = other_pg.last_pose_id,
                                                   information = [10., 10., 10.])
         if not success:
-            self.log("Could not measure {other_pg.pgo_id}!")
+            self.log(f"Could not measure {other_pg.pgo_id}!")
 
 
     def add_new_edge_between_poses(self,
@@ -678,6 +688,9 @@ class PoseGraph(object):
         for pid in (pid1, pid2):
             if self.pose_edges.get(pid) is None:
                 self.pose_edges[pid] = []
+
+            if pid is None:
+                return False
 
             if self.pgo.vertex(pid) is None:
                 return False
@@ -770,11 +783,13 @@ if __name__=='__main__':
             auv1.update(dt=0.5)
             auv2.update(dt=0.5)
 
-            p = np.array(auv.pose) + [drift, 0, 0]
             drift += 0.05
+
+            p = np.array(auv.pose) + [drift, 0, 0]
             pg.append_pose(p)
             pg1.append_pose(auv1.pose)
-            pg2.append_pose(auv2.pose)
+            p = np.array(auv2.pose) + [-drift, 0, 0]
+            pg2.append_pose(p)
 
             if auv.reached_target:
                 break
@@ -798,14 +813,14 @@ if __name__=='__main__':
 
         auv.set_target([left,cup])
         auv1.set_target([right,cup])
-        auv2.set_target([left-10,cup])
+        auv2.set_target([left-15,cup])
         run(100)
 
         cup += up
 
         auv.set_target([left,cup])
         auv1.set_target([right,cup])
-        auv2.set_target([left-10,cup])
+        auv2.set_target([left-15,cup])
         run(100)
 
 
