@@ -5,6 +5,7 @@
 
 
 import numpy as np
+np.set_printoptions(formatter={'float': '{: 0.4f}'.format})
 from toolbox import geometry as geom
 
 
@@ -142,10 +143,10 @@ class AUV(object):
         self.pose[1] = pos[1]
 
     def set_pose(self, pose):
-        old_pose = self.pose
+        old_pose = np.array(self.pose)
         self.set_position(pose[:2])
         self.set_heading(pose[2])
-        self.log(f"Set pose {old_pose} -> {self.pose}")
+        self.log(f"Set pose {old_pose} -> {np.array(self.pose)}")
 
 
     def set_target(self, target_pos):

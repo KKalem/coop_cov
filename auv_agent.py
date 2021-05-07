@@ -109,6 +109,8 @@ class AUVAgent(object):
 
 
     def optimize_graph(self):
+        self.log('optimizing graph')
+        return
         success = self.pose_graph.optimize()
         if success:
             self.auv.set_pose(self.pose_graph.last_corrected_pose)
@@ -132,7 +134,6 @@ class AUVAgent(object):
 
 
 
-
         # we can read the compass at all times
         self.auv.set_heading(real_auv.heading)
         # whatever we do, auv "runs"
@@ -150,12 +151,12 @@ if __name__ == "__main__":
     from mission_plan import construct_lawnmower_paths
     from tqdm import tqdm
 
-    num_auvs = 4
-    num_hooks = 3
+    num_auvs = 5
+    num_hooks = 6
     hook_len = 100
     gap_between_rows = 1
     swath = 50
-    comm_range = 10
+    comm_range = 20
     dt = 0.5
     seed = 42
     std_shift = 0.3
@@ -241,20 +242,20 @@ if __name__ == "__main__":
     plt.axis('equal')
     for color, agent, real_auv in zip(colors, agents, real_auvs):
 
-        ax.plot(real_auv.pose_trace[:,0], real_auv.pose_trace[:,1], c=color, alpha=0.5)
-        ax.plot(agent.dr_pose_trace[:,0], agent.dr_pose_trace[:,1], c=color, linestyle='--', alpha=0.4)
-        ax.plot(agent.pose_graph.pose_trace[:,0], agent.pose_graph.pose_trace[:,1], c=color, linestyle=':', alpha=0.5)
+        if agent.agent_id == 2:
+            ax.plot(real_auv.pose_trace[:,0], real_auv.pose_trace[:,1], c=color, alpha=0.5)
+            ax.plot(agent.dr_pose_trace[:,0], agent.dr_pose_trace[:,1], c=color, linestyle='--', alpha=0.4)
+            ax.plot(agent.pose_graph.pose_trace[:,0], agent.pose_graph.pose_trace[:,1], c=color, linestyle=':', alpha=0.5)
 
-        ax.add_artist(Polygon(xy=real_auv.coverage_polygon(swath), closed=True, alpha=0.04, color=color, edgecolor=None))
+            ax.add_artist(Polygon(xy=real_auv.coverage_polygon(swath), closed=True, alpha=0.04, color=color, edgecolor=None))
 
-        if agent.agent_id == 1:
             # lc = LineCollection(segments = agent.pose_graph.all_edges, colors='black', alpha=0.3, linestyles='solid')
             # ax.add_collection(lc)
             for p1,p2 in agent.pose_graph.all_edges:
                 plt.plot((p1[0], p2[0]), (p1[1], p2[1]), c='black', alpha=0.6)
 
             for p1,p2 in agent.pose_graph.edges_from_others:
-                plt.plot((p1[0], p2[0]), (p1[1], p2[1]), c='black', alpha=0.6)
+                plt.plot((p1[0], p2[0]), (p1[1], p2[1]), c='yellow', alpha=0.6)
 
 
 
