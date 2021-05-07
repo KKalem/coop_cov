@@ -50,6 +50,8 @@ class AUV(object):
         return f'[auv:{self.auv_id}@{self.pose}]'
 
     def log(self, *args):
+        if len(args) == 1:
+            args = args[0]
         print(f'[AUV:{self.auv_id}]\t{args}')
 
     @property
@@ -140,8 +142,10 @@ class AUV(object):
         self.pose[1] = pos[1]
 
     def set_pose(self, pose):
+        old_pose = self.pose
         self.set_position(pose[:2])
         self.set_heading(pose[2])
+        self.log(f"Set pose {old_pose} -> {self.pose}")
 
 
     def set_target(self, target_pos):
