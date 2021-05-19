@@ -42,11 +42,6 @@ class PoseGraphOptimization(g2o.SparseOptimizer):
         # heads with high info matrix
         self.min_num_of_verts_to_optimize = min_num_of_verts_to_optimize
 
-        # keep track of the verts and edges that we merged last
-        # so that we dont go over thousands of them every time
-        self.other_pgo_last_merged_vertex_id = {}
-        self.other_pgo_last_merged_edge_id = {}
-
         # we need this because edges dont have a dictionary
         # like vertices do by default
         self.edge_id_to_edge = {}
@@ -75,84 +70,6 @@ class PoseGraphOptimization(g2o.SparseOptimizer):
         return True
 
 
-
-
-    def get_last_merged_ids(self, other_pgo_id):
-        vid = self.other_pgo_last_merged_edge_id.get(other_pgo_id)
-        if vid is None:
-            self.other_pgo_last_merged_vertex_id[other_pgo_id] = -1
-            vid = -1
-
-        eid = self.other_pgo_last_merged_edge_id.get(other_pgo_id)
-        if eid is None:
-            self.other_pgo_last_merged_edge_id[other_pgo_id] = -1
-            eid = -1
-
-        return vid, eid
-
-
-    def merge_with(self, other_pgo):
-        # add all the vertices and edges from the given other_pgo
-        # into this one by copying them in
-
-        # what are the vert and edge that we last merged on?
-        # we need not go lower than these when merging
-        # assumption here is that _every_ new thing added will have ids
-        # larger than anything before, no id reuse!
-        other_pgo_id = other_pgo.pgo_id
-        last_v_id, last_e_id = self.get_last_merged_ids(other_pgo_id)
-
-        other_vert_ids = other_pgo.vertex_ids
-        if len(other_vert_ids) < 1:
-            self.log(f'Other pgo {other_pgo_id} was empty, nothing to merge')
-            return
-
-
-        # reversed, because we want to look at the _last_ vertex first
-        # so that we can stop when we see a specific one
-        for v_id in reversed(other_vert_ids):
-            if v_id <= last_v_id:
-                # we have all the other verts already, skip the rest
-                break
-
-            vert = self.vertex(v_id)
-            if vert is not None:
-                # we already know this vert, skip it
-                continue
-
-            new_vert = other_pgo.vertex(v_id)
-            self.other_pgo_last_merged_vertex_id[other_pgo_id] = v_id
-            self.add_vertexse2(new_vert)
-
-
-        # we now got the verts added to ourself.
-        # now we need the edges between them from the other pgo
-        other_edge_ids = other_pgo.edge_ids
-        self_edges = self.edge_ids
-        i=0
-        for e_id in reversed(other_edge_ids):
-            e = other_pgo.edge_id_to_edge.get(e_id)
-            if e is None:
-                continue
-
-            v1, v2 = e.vertices()
-            if v1 is None or v2 is None:
-                # this edge's verts were summarized away
-                continue
-
-            eid = e.id()
-            if eid <= last_e_id:
-                break
-
-            if eid in self_edges:
-                # we already have this edge
-                continue
-
-            self.add_edgese2(vse2s = [v1, v2],
-                             eid = e.id(),
-                             information = e.information())
-            self.other_pgo_last_merged_edge_id[other_pgo_id] = eid
-            i += 1
 
 
 
@@ -343,6 +260,8 @@ class OdomEdge(object):
         # which graph do i belong to?
         self.pg_id = pg_id
 
+    def __repr__(self):
+        return f"<E:{self.edge_id}@{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
 
     @property
     def as_dict(self):
@@ -389,6 +308,9 @@ class MeasuredEdge(object):
         self.pg_id = pg_id
 
 
+    def __repr__(self):
+        return f"<E:{self.edge_id}@{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
+
     @property
     def as_dict(self):
         edge = {'vertices':(self.parent_vid, self.child_vid),
@@ -417,6 +339,8 @@ class Vertex(object):
         # edges that are shared between this pose and either a parent or a child
         self.connected_edge_ids = {}
 
+    def __repr__(self):
+        return f"<V:{self.vid}@{self.pose} of pg{self.pg_id}>"
 
     @property
     def connected_vertex_ids(self):
@@ -446,11 +370,17 @@ class PoseGraph(object):
         self.pg_id = pg_id
         self.id_store = id_store
 
+        self.root_vertex = None
+
         # id -> Pose/Edge
         self.all_vertices = {}
         self.all_edges = {}
 
+        # the vertex object that is at the end of the odometry chain
         self.odom_tip_vertex = None
+
+        # the tips of other graphs that we interacted with
+        self.other_odom_tip_vertices = {}
 
 
     def log(self, *args):
@@ -459,8 +389,85 @@ class PoseGraph(object):
         print(f'[PG:{self.pg_id}]\t{args}')
 
 
+
+    @property
+    def odom_pose_trace(self):
+        poses = []
+        # start from the tip and move backwards to create the chain
+        vertex  = self.odom_tip_vertex
+        while vertex is not None:
+            poses.append(vertex.pose)
+            parents = vertex.parent_vids
+            vertex = None
+            for parent_vid in parents:
+                # out of all the parents (there might be many)
+                # find the one that belongs to this pose graph
+                parent = self.all_vertices.get(parent_vid)
+                if parent is not None:
+                    if parent.pg_id == self.pg_id:
+                        vertex = parent
+
+        return np.array(poses)
+
+    @property
+    def fixed_poses(self):
+        poses = []
+        for vid, vertex in self.all_vertices.items():
+            if vertex.fixed:
+                poses.append(vertex.pose)
+        return np.array(poses)
+
+    @property
+    def measured_edges(self):
+        edges = []
+        for eid, edge in self.all_edges.items():
+            if type(edge) == MeasuredEdge:
+                edges.append(edge)
+        return edges
+
+    @property
+    def odom_edges(self):
+        edges = []
+        for eid, edge in self.all_edges.items():
+            if type(edge) == OdomEdge:
+                edges.append(edge)
+        return edges
+
+
+    @property
+    def self_odom_edges(self):
+        edges = []
+        for eid, edge in self.all_edges.items():
+            if type(edge) == OdomEdge and edge.pg_id == self.pg_id:
+                edges.append(edge)
+        return edges
+
+
+    @property
+    def foreign_edges(self):
+        edges = []
+        for eid, edge in self.all_edges.items():
+            if edge.pg_id != self.pg_id:
+                edges.append(edge)
+        return edges
+
+    @property
+    def foreign_poses(self):
+        poses = []
+        for vid, vertex in self.all_vertices.items():
+            if vertex.pg_id != self.pg_id:
+                poses.append(vertex.pose)
+        return np.array(poses)
+
+
+
+
     def append_odom_pose(self,
                          pose):
+        """
+        Add a new odometry pose to the tip of this graphs chain.
+        Fixes the first pose in the graph.
+        """
 
         vid = self.id_store.get_new_id()
 
@@ -477,6 +484,7 @@ class PoseGraph(object):
                        pg_id = self.pg_id)
             self.all_vertices[vid] = v
             self.odom_tip_vertex = v
+            self.root_vertex = v
         else:
             # not the first odom, not fixed
             # and has a parent
@@ -507,39 +515,16 @@ class PoseGraph(object):
             self.odom_tip_vertex = v
 
 
-    @property
-    def odom_pose_trace(self):
-        poses = []
-        # start from the tip and move backwards to create the chain
-        vertex  = self.odom_tip_vertex
-        while vertex is not None:
-            poses.append(vertex.pose)
-            parents = vertex.parent_vids
-            vertex = None
-            for parent_vid in parents:
-                # out of all the parents (there might be many)
-                # find the one that belongs to this pose graph
-                parent = self.all_vertices.get(parent_vid)
-                if parent is not None:
-                    if parent.pg_id == self.pg_id:
-                        vertex = parent
-
-        return np.array(poses)
-
-    @property
-    def fixed_poses(self):
-        poses = []
-        for vid, vertex in self.all_vertices.items():
-            if vertex.fixed:
-                poses.append(vertex.pose)
-        return np.array(poses)
-
-
 
     def measure_tip_to_tip(self,
                            self_real_pose,
                            other_real_pose,
                            other_pg):
+        """
+        Adds a measurement from the tip of this graph to the tip of another graph.
+        The real_poses are used to create the measurement, but the vertices are used from
+        the respective graph's odometry chain tips.
+        """
 
         own_vert = self.odom_tip_vertex
         other_vert = other_pg.odom_tip_vertex
@@ -562,308 +547,94 @@ class PoseGraph(object):
         self.all_edges[eid] = e
 
 
-    @property
-    def measured_edges(self):
-        edges = []
-        for eid, edge in self.all_edges.items():
-            if type(edge) == MeasuredEdge:
-                edges.append(edge)
-        return edges
 
-    @property
-    def odom_edges(self):
-        edges = []
-        for eid, edge in self.all_edges.items():
-            if type(edge) == OdomEdge:
-                edges.append(edge)
-        return edges
-
-
-
-
-
-
-
-
-
-class OldPoseGraph(object):
-    def __init__(self,
-                 pgo_id,
-                 pgo_id_store):
-
-        self.pgo_id = pgo_id
-        self.pgo_id_store = pgo_id_store
-
-
-        # keep track of which poses are _ours_
-        self.own_pose_ids = []
-        # keep track of which poses were ever fixed
-        self.fixed_pose_ids = []
-        # independent of the PGOs, keep a trace of poses after corrections
-        self.corrected_pose_trace = {}
-        # and before corrections too
-        self.raw_pose_trace = {}
-        # both indexed by pose vertex ids
-
-        self.last_pose = None
-        self.last_pose_id = None
-
-        self.min_poses_between_optims = 20
-        self.poses_since_last_optimization = 0
-
-        # which pose did we last hear about from which other pg?
-        self.other_last_pose_ids = {}
-
-        # keep a pose_id -> [edges] mapping so that we can add those edges
-        # when we hear about this pose from another PG
-        self.pose_edges = {}
-
-        self.num_pgos_optimized = 0
-
-        # a list of poses (not pids) that we received from other graphs
-        #XXX mostly for debugging?
-        self.edges_from_others = []
-
-
-
-    def log(self, *args):
-        if len(args) == 1:
-            args = args[0]
-        print(f'[PG:{self.pgo_id}]\t{args}')
-
-
-    def append_pose(self,
-                    pose):
+    def get_chain_between_verts(self, start_vertex, end_vertex=None):
         """
-        pose is [x,y,heading(rad)]
+        follow the chain from start to end, return a list of vertex objects that make up the chain
+        if end_vertex is None, use our odom tip
         """
-        pose_id = self.pgo_id_store.get_new_id()
 
-        if type(pose) != np.ndarray:
-            pose = np.array(pose)
+        if end_vertex is None:
+            end_vertex = self.odom_tip_vertex
 
-        if self.last_pose is None:
-            # this is the first pose in the graphs
-            # so it is not connected to any previous pose --> BS.
-            # this might not be the _actual_ first pose but a middle-pose that 
-            # an optimization happen. so it MIGHT have a parent!!!
-            # fix it 
-            self.pgo.add_vertex(pose_id, pose, fixed=True)
-            self.own_pose_ids.append(pose_id)
-            self.log(f"First pose in the graph = {pose_id}@{pose}")
-            self.fixed_pose_ids.append(pose_id)
-        else:
-            # there is a previous pose we should make an edge with
-            # check if the new pose is too close to the previous one
-            # this happens if the vehicle is not moving.
-            diff = np.abs(pose - self.last_pose)
-            if diff[0] < 0.1 and diff[1] < 0.1:
-                return
+        if start_vertex is None:
+            start_vertex = self.root_vertex
 
-            self.pgo.add_vertex(pose_id, pose, fixed=False)
-            self.own_pose_ids.append(pose_id)
-
-            information = [1., 1., 1000.]
-
-            self.add_new_edge_between_poses(self.last_pose, self.last_pose_id,
-                                            pose, pose_id,
-                                            information)
+        if start_vertex is None:
+            return {}, {}, True
 
 
-        self.last_pose = pose
-        self.last_pose_id = pose_id
-        self.poses_since_last_optimization += 1
-        self.raw_pose_trace[pose_id] = pose
+        vertex_chain = {}
+        complete = False
+        # start from the tip and move backwards to create the chain
+        vertex  = end_vertex
+        while vertex is not None:
+            vertex_chain[vertex.vid] = vertex
+
+            if vertex.vid == start_vertex.vid:
+                complete = True
+                break
+
+            parents = vertex.parent_vids
+            vertex = None
+            for parent_vid in parents:
+                # out of all the parents (there might be many)
+                # find the one that belongs to this pose graph
+                parent = self.all_vertices.get(parent_vid)
+                if parent is not None:
+                    if parent.pg_id == self.pg_id:
+                        vertex = parent
+
+        edges = {}
+        # then collect the edges that _touch_ these vertices
+        # this might include an edge that is out of this chain
+        # but that is okay.
+        # there will be duplicates (one edge from child, one from parent for ex.)
+        # but that is also okay.
+        for vid, vertex in vertex_chain.items():
+            for vid, eid in vertex.connected_edge_ids.items():
+                edge = self.all_edges.get(eid)
+                if edge is not None:
+                    edges[eid] = edge
 
 
-    @property
-    def pose_trace(self):
-        poses = []
-        for d in [self.corrected_pose_trace, self.raw_pose_trace]:
-            vert_ids = list(d.keys())
-            vert_ids.sort()
-            for vid in vert_ids:
-                poses.append(d[vid])
-        return np.array(poses)
-
-    @property
-    def fixed_poses(self):
-        poses = []
-        for pid in self.fixed_pose_ids:
-            p = self.pose_from_pid(pid)
-            if p is not None:
-                poses.append(p)
-
-        return poses
-
-
-    @property
-    def all_edges(self):
-        all_edges = []
-        for pid, edges in self.pose_edges.items():
-            for edge in edges:
-                pid1, pid2 = edge['vertices']
-                p1 = self.pose_from_pid(pid1)
-                p2 = self.pose_from_pid(pid2)
-                if p1 is not None and p2 is not None:
-                    all_edges.append((p1[:2],p2[:2]))
-        return all_edges
-
-
-    @property
-    def last_corrected_pose(self):
-        maxkey = max(list(self.corrected_pose_trace.keys()))
-        return self.corrected_pose_trace.get(maxkey)
+        return vertex_chain, edges, complete
 
 
 
-    def pose_from_pid(self, pid):
-        p = self.corrected_pose_trace.get(pid)
-        if p is not None:
-            return p
-
-        p = self.raw_pose_trace.get(pid)
-        if p is not None:
-            return p
-
-        p = self.pgo.get_pose_array(pid)
-        return p
 
 
-    def edges_from_pid(self, pid):
-        e = self.pose_edges.get(pid)
-        return e
-
-
-
-    def optimize(self):
-        if self.poses_since_last_optimization <= self.min_poses_between_optims:
-            return False
-
-        self.pgo.save(f"{self.pgo_id}_{self.num_pgos_optimized}.g2o")
-
-        success = self.pgo.optimize(max_iterations=200)
-        if not success:
-            self.log(f'Optimization failed!')
-            return False
-
-        # optimized. copy the corrected poses into our own stash
-        # and re-create a fresh pgo
-        self.corrected_pose_trace.update(self.pgo.get_all_poses_dict(id_list=self.own_pose_ids))
-        self.raw_pose_trace = {}
-        self.pgo = PoseGraphOptimization(pgo_id = self.pgo_id)
-        self.poses_since_last_optimization = 0
-        self.num_pgos_optimized += 1
-        return True
-
-
-    def provide_pose_to_other(self, pid):
-        # return a pose from our own current raw poses only
-        # also return if this pose is fixed
-        return self.pgo.get_pose_array(pid), self.pgo.pose_is_fixed(pid)
-
-
-
-    def communicate_with_other(self,
-                               other_pg):
-
-        # last known pose id of the other pg
-        # we either know it, or we default to 0
-        other_last_id = self.other_last_pose_ids.get(other_pg.pgo_id, 0)
-
-        # start going DOWN from their current id
-        # until either we reach the beginning of their raw
-        # poses, or we reach the last known pose id from before
-        # effectively fill in the missing info between now and past
-        # yes there are 'empty' slots here, i dont care
-        # with some extras too, just to _make sure_ that we get the latest of all
-        if other_pg.last_pose_id is None:
-            self.log(f"{other_pg.pgo_id}'s lsat_pose_id is None, can't collect poses from it!")
-            return
-
-
-        begin = other_last_id-20
-        end = other_pg.last_pose_id+10
-        # filter out the pids that we know we have in our own pgo
-        # pid_list = list(filter(lambda pid: self.pgo.vertex(pid) is None, reversed(range(begin, end))))
-        pid_list = list(reversed(range(begin, end)))
-        added_pids = []
-        for pid in pid_list:
-            new_pose, fixed = other_pg.provide_pose_to_other(pid)
-            if new_pose is not None:
-                self.pgo.add_vertex(pid, new_pose, fixed)
-                added_pids.append(pid)
-
-        # add the edges that belong to the same poses we just added
-        # for pid in added_pids:
-        for pid in added_pids:
-            new_edges = other_pg.edges_from_pid(pid)
-            for new_edge in new_edges:
-                if new_edge is not None:
-                    self.add_edge_between_poses(new_edge)
-                    self.edges_from_others.append(new_edge['poses'])
-
-        # remember the last vertex we touched this pg
-        self.other_last_pose_ids[other_pg.pgo_id] = other_pg.last_pose_id
-
-
-    def measure_other_agent(self,
-                            self_pose,
-                            other_pose,
-                            other_pg):
-
-        if other_pg.last_pose_id is None:
-            self.log(f"{other_pg.pgo_id}'s last_pose_id is None, cant measure it!")
-
-        success = self.add_new_edge_between_poses(self_pose = self_pose,
-                                                  self_pose_id = self.last_pose_id,
-                                                  other_pose = other_pose,
-                                                  other_pose_id = other_pg.last_pose_id,
-                                                  information = [100., 100., 100.])
-        if not success:
-            self.log(f"Could not measure {other_pg.pgo_id}!")
-
-
-    def add_new_edge_between_poses(self,
-                                   self_pose, self_pose_id,
-                                   other_pose, other_pose_id,
-                                   information):
+    def fill_in_since_last_interaction(self, other_pg):
         """
-        add and edge to our pgo between our pose and the pose of the
-        other pose graph
+        add all the verts and edges from another pg, between its current tip and
+        our last known tip.
         """
-        assert type(information) in [list, np.ndarray] and len(information) == 3, "Information length is not 3!"
+        start_vert = self.other_odom_tip_vertices.get(other_pg.pg_id)
+        # from the previously known latest vertex to whatever tip the other pg has
+        # this is where we can measure bandwidth requirement too
+        vertices, edges, complete = other_pg.get_chain_between_verts(start_vertex = start_vert,
+                                                                     end_vertex = None)
 
-        edge_id = self.pgo_id_store.get_new_id()
+        self.all_vertices.update(vertices)
+        self.all_edges.update(edges)
 
-        edge = {'vertices':(self_pose_id, other_pose_id),
-                'poses':(self_pose, other_pose),
-                'eid':edge_id,
-                'information':information}
-
-        success = self.add_edge_between_poses(edge)
-        if not success:
-            self.log(f"Edge={edge} couldnt be added between poses")
-
-        return success
+        self.other_odom_tip_vertices[other_pg.pg_id] = other_pg.odom_tip_vertex
 
 
-    def add_edge_between_poses(self, edge):
-        pid1, pid2 = edge['vertices']
-
-        for pid in (pid1, pid2):
-            if pid is None or self.pgo.vertex(pid) is None:
-                # self.log("{pid} was {self.pgo.vertex(pid)} for edge={edge}")
-                return False
-
-            if self.pose_edges.get(pid) is None:
-                self.pose_edges[pid] = []
 
 
-        self.pose_edges[pid1].append(edge)
 
-        self.pgo.add_edge(**edge)
-        return True
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -879,6 +650,10 @@ if __name__=='__main__':
     import matplotlib.pyplot as plt
     from mission_plan import construct_lawnmower_paths
     from auv import AUV
+
+    from matplotlib.textpath import TextPath
+    from matplotlib.patches import PathPatch
+
     try:
         __IPYTHON__
         plt.ion()
@@ -895,8 +670,8 @@ if __name__=='__main__':
 
     paths = construct_lawnmower_paths(num_agents = 3,
                                       num_hooks=3,
-                                      hook_len=100,
-                                      swath=50,
+                                      hook_len=10,
+                                      swath=5,
                                       gap_between_rows=1,
                                       double_sided=False)
 
@@ -943,35 +718,56 @@ if __name__=='__main__':
                                                   other_real_pose=auv2.pose,
                                                   other_pg=pg2)
 
+                            pg.fill_in_since_last_interaction(pg2)
+
+
 
             reached = [auv.reached_target for auv in auvs]
             if all(reached):
                 break
 
-    run(1)
-    run(2)
-    run(3)
-    run(4)
-
     colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
+    for i in range(10):
+        run(i+1)
+
+
+
+    print('Plotting')
     for c,pg in zip(colors,pgs):
         t = pg.odom_pose_trace
         plt.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
-        t = pg.fixed_poses
-        plt.scatter(t[:,0], t[:,1], alpha=1, marker='x', s=10, c=c)
+        for p in pg.fixed_poses:
+            plt.text(p[0], p[1], 'F', c=c)
 
         for edge in pg.measured_edges:
             p1 = edge.parent_pose
             p2 = edge.child_pose
             diff = p2-p1
-            plt.arrow(p1[0], p1[1], diff[0], diff[1], alpha=0.3, color=c, head_width=0.5, length_includes_head=True)
+            plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                      alpha=0.3, color=c, head_width=0.5, shape='left',
+                      length_includes_head=True)
 
-        for edge in pg.odom_edges:
+        for edge in pg.self_odom_edges:
             p1 = edge.parent_pose
             p2 = edge.child_pose
             diff = p2-p1
             plt.arrow(p1[0], p1[1], diff[0], diff[1], alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
+
+        pg_marker = ' '*pg.pg_id + 'f'
+        for p in pg.foreign_poses:
+            tp = TextPath(p[:2], pg_marker, size=0.1)
+            plt.gca().add_patch(PathPatch(tp, color=c))
+
+        for edge in pg.foreign_edges:
+            p1 = edge.parent_pose
+            p2 = edge.child_pose
+            p = (p2+p1)/2
+            tp = TextPath(p[:2], pg_marker, size=0.1)
+            plt.gca().add_patch(PathPatch(tp, color=c))
+
+
+    print('Done plotting')
 
 
 
