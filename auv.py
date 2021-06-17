@@ -60,6 +60,10 @@ class AUV(object):
         return np.array(self._pose_trace)
 
     @property
+    def apose(self):
+        return np.array(self.pose)
+
+    @property
     def heading_vec(self):
         return np.array((np.cos(self.heading),np.sin(self.heading)))
 

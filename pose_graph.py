@@ -71,9 +71,6 @@ class PoseGraphOptimization(g2o.SparseOptimizer):
 
 
 
-
-
-
     def add_vertex(self, v_id, pose, fixed=False):
         if self.vertex(v_id) is not None:
             return False
@@ -382,6 +379,9 @@ class PoseGraph(object):
         # the tips of other graphs that we interacted with
         self.other_odom_tip_vertices = {}
 
+        # the id of the pose that we last did an optim on
+        self.last_optim_vert_id = None
+
 
     def log(self, *args):
         if len(args) == 1:
@@ -622,6 +622,60 @@ class PoseGraph(object):
 
 
 
+    def make_pgo(self, start_from=None, save=False):
+
+        if start_from is None:
+            start_from = -1
+
+        # the optimizer object
+        pgo = PoseGraphOptimization(pgo_id = self.pg_id)
+        # add all the vertices
+        for vid, vert in self.all_vertices.items():
+            if vid >= start_from:
+                pgo.add_vertex(v_id = vid,
+                               pose = vert.pose,
+                               fixed = vert.fixed)
+
+        # add all the edges
+        for eid, edge in self.all_edges.items():
+            if eid >= start_from:
+                pgo.add_edge(**edge.as_dict)
+
+        if save:
+            if self.last_optim_vert_id is None:
+                self.last_optim_vert_id = 0
+            pgo.save(f"pg_{self.pg_id}_{self.last_optim_vert_id}.g2o")
+
+        return pgo
+
+
+
+
+    def optimize(self, save_before=False):
+        # first, out of our own graph, construct a PGO
+        # using vertices that go until the previous optimized tip
+        # optimize the PGO
+        # from the PGO graph, update our own vertices
+        # mark our updated tip as fixed
+        # remember our updated tip for next time
+
+        pgo = self.make_pgo(save=save_before, start_from=self.last_optim_vert_id)
+
+        success = pgo.optimize(max_iterations=100)
+
+        if not success:
+            self.log(f"Optim failed at v:{self.last_optim_vert_id}")
+            return success
+
+        # update our own vertices from the pgo
+        for vid in pgo.vertices():
+            new_pose = pgo.get_pose_array(vid)
+            self.all_vertices[vid].update_pose(new_pose)
+
+
+        self.last_optim_vert_id = self.odom_tip_vertex.vid
+        # self.all_vertices[self.last_optim_vert_id].fixed = True
+
 
 
 
@@ -670,8 +724,8 @@ if __name__=='__main__':
 
     paths = construct_lawnmower_paths(num_agents = 3,
                                       num_hooks=3,
-                                      hook_len=10,
-                                      swath=5,
+                                      hook_len=20,
+                                      swath=10,
                                       gap_between_rows=1,
                                       double_sided=False)
 
@@ -697,14 +751,22 @@ if __name__=='__main__':
         plt.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
 
 
+    error = 0
     def run(wp_idx):
         for auv,path in zip(auvs, paths):
             auv.set_target(path[wp_idx])
 
+        global error
         for i in range(150):
+            error += 0.1
             for pg, auv in zip(pgs,auvs):
                 auv.update(dt=dt)
-                pg.append_odom_pose(auv.pose)
+                if pg.pg_id%2 == 0:
+                    scrambled_pose = auv.apose + [error, error, 0]
+                else:
+                    scrambled_pose = auv.apose - [error, error, 0]
+
+                pg.append_odom_pose(scrambled_pose)
 
             if i%5==0:
                 for pg, auv in zip(pgs,auvs):
@@ -722,6 +784,8 @@ if __name__=='__main__':
 
 
 
+
+
             reached = [auv.reached_target for auv in auvs]
             if all(reached):
                 break
@@ -730,6 +794,9 @@ if __name__=='__main__':
     for i in range(10):
         run(i+1)
 
+
+    for pg in pgs:
+        pg.optimize(save_before=True)
 
 
     print('Plotting')
@@ -765,6 +832,10 @@ if __name__=='__main__':
             p = (p2+p1)/2
             tp = TextPath(p[:2], pg_marker, size=0.1)
             plt.gca().add_patch(PathPatch(tp, color=c))
+
+    for c,auv in zip(colors, auvs):
+        t = auv.pose_trace
+        plt.scatter(t[:,0], t[:,1], alpha=0.1, marker='.', c=c)
 
 
     print('Done plotting')
