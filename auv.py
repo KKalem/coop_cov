@@ -42,7 +42,6 @@ class AUV(object):
         self._pose_trace = []
         self.pose = [self.pos[0], self.pos[1], self.heading]
 
-        self.reached_target = False
         self.target_pos = None
         self.target_threshold = target_threshold
 
@@ -54,6 +53,19 @@ class AUV(object):
         if len(args) == 1:
             args = args[0]
         print(f'[AUV:{self.auv_id}]\t{args}')
+
+
+    @property
+    def reached_target(self):
+        if self.target_pos is None or self.pos is None:
+            return False
+
+        diff = self.target_pos - self.pos
+        if abs(diff[0]) <= self.target_threshold and abs(diff[1]) <= self.target_threshold:
+            return True
+
+        return False
+
 
     @property
     def pose_trace(self):
@@ -71,10 +83,10 @@ class AUV(object):
         if self.target_pos is None:
             return None, 0
 
-        diff = self.target_pos - self.pos
-        if abs(diff[0]) <= self.target_threshold and abs(diff[1]) <= self.target_threshold:
-            self.reached_target = True
+        if self.reached_target:
+            return None, 0
 
+        diff = self.target_pos - self.pos
         angle_to_target = geom.vec2_directed_angle(self.heading_vec, diff)
         turn_direction = np.sign(angle_to_target)
 
@@ -94,10 +106,7 @@ class AUV(object):
         """
         # if these arent given, run autonomously
         if turn_direction is None or turn_amount is None:
-            if self.reached_target:
-                turn_direction = None
-            else:
-                turn_direction, turn_amount = self._get_turn_direction()
+            turn_direction, turn_amount = self._get_turn_direction()
 
             if turn_direction is None or dt==0.:
                 # we dont want to move apparently.
@@ -155,9 +164,8 @@ class AUV(object):
 
     def set_target(self, target_pos):
         if target_pos is None:
-            self.reached_target = True
+            self.target_pos = None
         else:
-            self.reached_target = False
             self.target_pos = np.array(target_pos)
 
 

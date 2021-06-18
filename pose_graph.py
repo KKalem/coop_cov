@@ -676,6 +676,8 @@ class PoseGraph(object):
         self.last_optim_vert_id = self.odom_tip_vertex.vid
         # self.all_vertices[self.last_optim_vert_id].fixed = True
 
+        return success
+
 
 
 
@@ -818,7 +820,8 @@ if __name__=='__main__':
             p1 = edge.parent_pose
             p2 = edge.child_pose
             diff = p2-p1
-            plt.arrow(p1[0], p1[1], diff[0], diff[1], alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
+            plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                      alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
 
         pg_marker = ' '*pg.pg_id + 'f'

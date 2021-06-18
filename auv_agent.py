@@ -3,166 +3,162 @@
 # vim:fenc=utf-8
 # Ozer Ozkahraman (ozero@kth.se)
 
+
 import numpy as np
 from toolbox import geometry as geom
 
 from mission_plan import MissionPlan
 from pose_graph import PoseGraph
+from auv import AUV
 
 
 
-class AUVAgent(object):
+class Agent(object):
     def __init__(self,
-                 auv,
-                 swath,
-                 comm_range,
-                 interact_period_ticks,
-                 pgo_id_store):
-        self.disable_logs = False
+                 real_auv,
+                 pose_graph,
+                 waypoints):
 
-        self.t = 0
-        self.agent_id = auv.auv_id
+        # a reference to the actual physical auv
+        # for ceonvenience
+        self._real_auv = real_auv
 
-        self.auv = auv
-        self.swath = swath
-        self.comm_range = comm_range
-        self.interact_period_ticks = interact_period_ticks
-        self.pose_graph = PoseGraph(pgo_id = auv.auv_id,
-                                    pgo_id_store = pgo_id_store)
-        self.mission_plan = None
+        self.pg = pose_graph
 
-        # initialize the graph immediately
-        self.pose_graph.append_pose(self.auv.pose)
-
-        # keep track of connection status over communication attempts
-        self.connected_on_attempt = []
+        # this auv model will be used to create the pose graph from
+        # noisy measurements of the real auv
+        self.internal_auv = AUV(auv_id = real_auv.auv_id,
+                                init_pos = real_auv.pose[:2],
+                                init_heading = real_auv.pose[2],
+                                target_threshold = real_auv.target_threshold,
+                                forward_speed = real_auv.forward_speed,
+                                auv_length = real_auv.auv_length,
+                                max_turn_angle = real_auv.max_turn_angle)
 
 
+        self.current_wp_idx = 0
+        self.waypoints = waypoints
 
-    @property
-    def dr_pose_trace(self):
-        return self.auv.pose_trace
+        self.connection_trace = []
 
     @property
-    def coverage_polygon(self):
-        return self.auv.coverage_polygon(swath=self.swath)
+    def waypoints_exhausted(self):
+        if self.current_wp_idx >= len(self.waypoints):
+            return True
+        return False
 
     def log(self, *args):
-        if not self.disable_logs:
-            if len(args) == 1:
-                args = args[0]
-
-            print(f"[AGNT:{self.agent_id}, {self.t}]\t{args}")
+        if len(args) == 1:
+            args = args[0]
+        print(f'[AGNT:{self.pg.pg_id}]\t{args}')
 
 
-    def set_plan(self, path):
-        self.mission_plan = MissionPlan(agent_id = self.agent_id,
-                                        waypoints = path)
-        self.log(f"Set={self.mission_plan}")
+    def update(self,
+               dt,
+               drift_x = 0.,
+               drift_y = 0.,
+               drift_heading = 0.):
+        # update internal auv
+        # apply the same control to real auv, with enviromental noise
+        # measure real auv (heading?), apply onto internal auv
+        # update pose graph with internal auv
 
 
-    def communicate_and_measure(self,
-                                all_agents,
-                                all_auvs,
-                                real_auv):
+        if self.internal_auv.reached_target:
+            self.log(f"Reached wp {self.current_wp_idx}")
+            self.current_wp_idx += 1
 
-        connected = False
-        if self.t % self.interact_period_ticks != 0:
+        if self.waypoints_exhausted:
             return
 
-        # dont care about the beginning...
-        if self.t < 50:
-            return
+        current_wp = self.waypoints[self.current_wp_idx]
+        self.internal_auv.set_target(current_wp)
+
+        # control real auv with what the internal one thinks
+        td, ta = self.internal_auv.update(dt)
+        self._real_auv.update(dt,
+                              turn_direction = td,
+                              turn_amount = ta,
+                              drift_x = drift_x,
+                              drift_y = drift_y,
+                              drift_heading = drift_heading)
+
+        # compass is good
+        self.internal_auv.set_heading(self._real_auv.heading)
+
+        # finally update the pose graph with the internal auv
+        self.pg.append_odom_pose(self.internal_auv.apose)
 
 
-        for other_agent, other_real_auv in zip(all_agents, all_auvs):
-            # is this guy us?
-            if other_agent.agent_id == self.agent_id:
+
+    def communicate(self,
+                    all_agents,
+                    comm_dist):
+
+        recorded = False
+
+        for agent in all_agents:
+            # skip self
+            if agent.pg.pg_id == self.pg.pg_id:
                 continue
 
-            # is this guy close enough?
-            dist = geom.euclid_distance(real_auv.pos, other_real_auv.pos)
-            if dist > self.comm_range:
-                continue
+            dist = geom.euclid_distance(self._real_auv.pose[:2], agent._real_auv.pose[:2])
+            if dist <= comm_dist:
+                self.pg.measure_tip_to_tip(self_real_pose = self._real_auv.pose,
+                                           other_real_pose = agent._real_auv.pose,
+                                           other_pg = agent.pg)
 
-            # we connected to _someone_
-            connected = True
-            # synch pose graphs
-            self.pose_graph.communicate_with_other(other_agent.pose_graph)
-            self.pose_graph.measure_other_agent(real_auv.pose,
-                                                other_real_auv.pose,
-                                                other_agent.pose_graph)
+                self.pg.fill_in_since_last_interaction(agent.pg)
 
+                # was not connected, just connected
+                if not recorded:
+                    self.connection_trace.append(True)
+                    recorded = True
 
-        # remember that we connected this tick
-        self.connected_on_attempt.append(connected)
-
-        # check if we just got disconnected from an agent
-        limit = 3
-        if len(self.connected_on_attempt) > limit:
-            was_connected = self.connected_on_attempt[-limit] == True
-            now_disconnected = all([x==False for x in self.connected_on_attempt[-limit+1:]])
-            if was_connected and now_disconnected:
-                self.pose_graph.optimize()
-                self.auv.set_pose(self.pose_graph.last_corrected_pose)
+        # is not connected to anyone
+        if not recorded:
+            self.connection_trace.append(False)
 
 
-
-    def optimize_graph(self):
-        self.log('optimizing graph')
-        return
-        success = self.pose_graph.optimize()
-        if success:
-            self.auv.set_pose(self.pose_graph.last_corrected_pose)
+        # if the connection status has changed, optimize the pose graph etc.
+        if len(self.connection_trace) > 2:
+            if self.connection_trace[-1] != self.connection_trace[-2]:
+                self.log("Conn event")
+                success = self.pg.optimize(save_before=True)
+                if success:
+                    self.log("Optim")
+                    self.internal_auv.set_pose(self.pg.odom_tip_vertex.pose)
+                else:
+                    self.log("No optim")
 
 
 
 
-    def update(self, dt, real_auv):
-        # got a plan
-        if self.mission_plan is not None:
-            # first update call ever
-            if not self.mission_plan.started:
-                self.auv.set_target(self.mission_plan.next_wp)
-            # not the first call, check if the auv reached the wp
-            if self.auv.reached_target:
-                # reached target, change to next target
-                self.mission_plan.visit_current()
-                # check if mission is complete
-                if not self.mission_plan.is_complete:
-                    self.auv.set_target(self.mission_plan.next_wp)
-
-
-
-        # we can read the compass at all times
-        self.auv.set_heading(real_auv.heading)
-        # whatever we do, auv "runs"
-        turn_direction, turn_amount = self.auv.update(dt)
-        self.pose_graph.append_pose(self.auv.pose)
-
-        self.t += 1
-        return turn_direction, turn_amount
 
 
 
 if __name__ == "__main__":
     from pose_graph import PGO_VertexIdStore
-    from auv import AUV
     from mission_plan import construct_lawnmower_paths
     from tqdm import tqdm
+    import signal
 
-    num_auvs = 5
-    num_hooks = 6
+
+    num_auvs = 3
+    num_hooks = 3
     hook_len = 100
     gap_between_rows = 1
     swath = 50
-    comm_range = 20
+    target_threshold = 1
+    comm_dist = 20
     dt = 0.5
     seed = 42
-    std_shift = 0.3
+    std_shift = 0.2
     consistent_x_drift = 0
     consistent_y_drift = 0
     interact_period_ticks = 5
+
+    max_ticks = 5000
 
 
     np.random.seed(seed)
@@ -174,62 +170,76 @@ if __name__ == "__main__":
                                       gap_between_rows=gap_between_rows,
                                       double_sided=False)
 
-    pgo_id_store = PGO_VertexIdStore()
+    id_store = PGO_VertexIdStore()
 
-    auvs = [AUV(auv_id = i,
-                init_pos = paths[i][0],
-                init_heading = 0) for i in range(len(paths))]
+    auvs = []
+    pgs = []
+    agents = []
+    for i,path in enumerate(paths):
+        auv = AUV(auv_id=i,
+                  init_pos = path[0],
+                  init_heading = 0,
+                  target_threshold=target_threshold)
 
-    agents = [AUVAgent(auv = auv,
-                       swath = swath,
-                       comm_range = comm_range,
-                       interact_period_ticks = interact_period_ticks,
-                       pgo_id_store = pgo_id_store) for auv in auvs]
 
-    [agent.set_plan(path) for agent,path in zip(agents,paths)]
+        pg = PoseGraph(pg_id = i,
+                       id_store = id_store)
 
-    real_auvs = [AUV(auv_id = i,
-                     init_pos = paths[i][0],
-                     init_heading = 0) for i in range(len(paths))]
+        agent = Agent(real_auv = auv,
+                      pose_graph = pg,
+                      waypoints = path)
+
+
+        auvs.append(auv)
+        pgs.append(pg)
+        agents.append(agent)
+
 
 
     done = False
     t = 0
+    print("Running...")
     with tqdm(total=paths.shape[0]*paths.shape[1]) as pbar:
-        while not done:
+        while True:
             t += 1
             pbar.desc = f'Tick:{t}'
-            # allow agents to interact first
-            for agent, real_auv in zip(agents, real_auvs):
-                agent.communicate_and_measure(all_agents = agents,
-                                              all_auvs = real_auvs,
-                                              real_auv = real_auv)
-
-            # and once that is done, let them move
-            for agent, real_auv in zip(agents, real_auvs):
-                # update the agent and get the control
-                turn_direction, turn_amount = agent.update(dt, real_auv)
-
-
-                # apply the control and disturbance to the the real auv
+            # move first
+            for agent in agents:
+                # enviromental drift
                 drift_x = np.random.normal(0, std_shift) + consistent_x_drift
                 drift_y = np.random.normal(0, std_shift) + consistent_y_drift
-                real_auv.update(dt,
-                                turn_direction,
-                                turn_amount,
-                                drift_x = drift_x,
-                                drift_y = drift_y,
-                                drift_heading = 0)
 
-                if agent.auv.reached_target:
+                agent.update(dt,
+                             drift_x = drift_x,
+                             drift_y = drift_y)
+
+                if agent.internal_auv.reached_target:
                     pbar.update(1)
 
-                if agent.mission_plan.is_complete:
-                    done = True
+            # interact second
+            if t%5 == 0:
+                for agent in agents:
+                    agent.communicate(agents,
+                                      comm_dist)
 
+            # check if done
+            paths_done = [agent.waypoints_exhausted for agent in agents]
+            if all(paths_done):
+                print("Paths done")
+                break
+
+            if t >= max_ticks:
+                print("Max ticks reached")
+                break
+
+    print("...Done")
+
+
+    print("Plotting...")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import Polygon, PathPatch
     from matplotlib.collections import LineCollection
+    from matplotlib.textpath import TextPath
 
     try:
         __IPYTHON__
@@ -237,41 +247,51 @@ if __name__ == "__main__":
     except:
         pass
 
-    colors = ['red', 'green', 'purple', 'orange', 'blue', 'cyan']
+    colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
     fig, ax = plt.subplots(1,1)
     plt.axis('equal')
-    for color, agent, real_auv in zip(colors, agents, real_auvs):
+    for path in paths:
+        p = np.array(path)
+        plt.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
 
-        if agent.agent_id == 2:
-            ax.plot(real_auv.pose_trace[:,0], real_auv.pose_trace[:,1], c=color, alpha=0.5)
-            ax.plot(agent.dr_pose_trace[:,0], agent.dr_pose_trace[:,1], c=color, linestyle='--', alpha=0.4)
-            ax.plot(agent.pose_graph.pose_trace[:,0], agent.pose_graph.pose_trace[:,1], c=color, linestyle=':', alpha=0.5)
+    for c, agent, pg, auv in zip(colors, agents, pgs, auvs):
 
-            ax.add_artist(Polygon(xy=real_auv.coverage_polygon(swath), closed=True, alpha=0.04, color=color, edgecolor=None))
+        ax.scatter(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
+        ax.scatter(agent.internal_auv.pose_trace[:,0], agent.internal_auv.pose_trace[:,1], c=c, alpha=0.5, marker='+')
+        # ax.add_artist(Polygon(xy=auv.coverage_polygon(swath), closed=True, alpha=0.04, color=c, edgecolor=None))
 
-            # lc = LineCollection(segments = agent.pose_graph.all_edges, colors='black', alpha=0.3, linestyles='solid')
-            # ax.add_collection(lc)
-            for p1,p2 in agent.pose_graph.all_edges:
-                plt.plot((p1[0], p2[0]), (p1[1], p2[1]), c='black', alpha=0.6)
+        t = pg.odom_pose_trace
+        plt.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
+        for p in pg.fixed_poses:
+            plt.text(p[0], p[1], 'F', c=c)
 
-            for p1,p2 in agent.pose_graph.edges_from_others:
-                plt.plot((p1[0], p2[0]), (p1[1], p2[1]), c='yellow', alpha=0.6)
+        for edge in pg.measured_edges:
+            p1 = edge.parent_pose
+            p2 = edge.child_pose
+            diff = p2-p1
+            plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                      alpha=0.3, color=c, head_width=0.5, shape='left',
+                      length_includes_head=True)
 
-
-
-
-
-
-
-
-
-
-
-
-
+        for edge in pg.self_odom_edges:
+            p1 = edge.parent_pose
+            p2 = edge.child_pose
+            diff = p2-p1
+            plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                      alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
 
+        pg_marker = ' '*pg.pg_id + 'f'
+        for p in pg.foreign_poses:
+            tp = TextPath(p[:2], pg_marker, size=0.1)
+            plt.gca().add_patch(PathPatch(tp, color=c))
 
+        for edge in pg.foreign_edges:
+            p1 = edge.parent_pose
+            p2 = edge.child_pose
+            p = (p2+p1)/2
+            tp = TextPath(p[:2], pg_marker, size=0.1)
+            plt.gca().add_patch(PathPatch(tp, color=c))
 
 
 
