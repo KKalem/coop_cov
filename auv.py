@@ -54,6 +54,14 @@ class AUV(object):
             args = args[0]
         print(f'[AUV:{self.auv_id}]\t{args}')
 
+    @property
+    def distance_traveled(self):
+        trace = self.pose_trace
+        diffs = trace[:-1, :2] - trace[1:, :2]
+        lens = geom.vec_len(diffs)
+        dist = sum(lens)
+        return dist
+
 
     @property
     def reached_target(self):
@@ -159,7 +167,7 @@ class AUV(object):
         old_pose = np.array(self.pose)
         self.set_position(pose[:2])
         self.set_heading(pose[2])
-        self.log(f"Set pose {old_pose} -> {np.array(self.pose)}")
+        # self.log(f"Set pose {old_pose} -> {np.array(self.pose)}")
 
 
     def set_target(self, target_pos):

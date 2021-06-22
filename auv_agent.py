@@ -64,12 +64,12 @@ class Agent(object):
         # update pose graph with internal auv
 
 
-        if self.internal_auv.reached_target:
-            self.log(f"Reached wp {self.current_wp_idx}")
+        if self.internal_auv.reached_target and not self.waypoints_exhausted:
             self.current_wp_idx += 1
 
         if self.waypoints_exhausted:
             return
+
 
         current_wp = self.waypoints[self.current_wp_idx]
         self.internal_auv.set_target(current_wp)
@@ -123,14 +123,19 @@ class Agent(object):
         # if the connection status has changed, optimize the pose graph etc.
         if len(self.connection_trace) > 2:
             if self.connection_trace[-1] != self.connection_trace[-2]:
-                self.log("Conn event")
                 success = self.pg.optimize(save_before=True)
                 if success:
-                    self.log("Optim")
                     self.internal_auv.set_pose(self.pg.odom_tip_vertex.pose)
-                else:
-                    self.log("No optim")
 
+
+
+    def distance_traveled_error(self):
+        # from the GT auv, find distance traveled
+        travel = self._real_auv.distance_traveled
+        final_error = geom.euclid_distance(self._real_auv.apose, self.internal_auv.apose)
+        error = final_error / travel
+        self.log(f"Travel: {travel}, err:{final_error}")
+        return error
 
 
 
@@ -144,22 +149,23 @@ if __name__ == "__main__":
     import signal
 
 
-    num_auvs = 3
-    num_hooks = 3
-    hook_len = 100
-    gap_between_rows = 1
+    num_auvs = 5
+    num_hooks = 5
+    hook_len = 200
+    gap_between_rows = 10
     swath = 50
-    target_threshold = 1
-    comm_dist = 20
+    target_threshold = 2
+    comm_dist = 50
     dt = 0.5
-    seed = 42
-    std_shift = 0.2
-    consistent_x_drift = 0
-    consistent_y_drift = 0
+    seed = 43
+    std_shift = 0.4
+    std_consistent = 0.02
     interact_period_ticks = 5
 
-    max_ticks = 5000
+    max_ticks = 15000
 
+    consistent_x_drifts = [np.random.normal(0, std_consistent) for i in range(num_auvs)]
+    consistent_y_drifts = [np.random.normal(0, std_consistent) for i in range(num_auvs)]
 
     np.random.seed(seed)
 
@@ -204,10 +210,10 @@ if __name__ == "__main__":
             t += 1
             pbar.desc = f'Tick:{t}'
             # move first
-            for agent in agents:
+            for i,agent in enumerate(agents):
                 # enviromental drift
-                drift_x = np.random.normal(0, std_shift) + consistent_x_drift
-                drift_y = np.random.normal(0, std_shift) + consistent_y_drift
+                drift_x = np.random.normal(0, std_shift) + consistent_x_drifts[i]
+                drift_y = np.random.normal(0, std_shift) + consistent_y_drifts[i]
 
                 agent.update(dt,
                              drift_x = drift_x,
@@ -233,6 +239,9 @@ if __name__ == "__main__":
                 break
 
     print("...Done")
+
+    errs = [a.distance_traveled_error() for a in agents]
+    print(f"Distance traveled errors: {errs}")
 
 
     print("Plotting...")
@@ -294,4 +303,7 @@ if __name__ == "__main__":
             plt.gca().add_patch(PathPatch(tp, color=c))
 
 
+    for agent, dx, dy in zip(agents, consistent_x_drifts, consistent_y_drifts):
+        x,y = agent.internal_auv.pose_trace[0][:2]
+        plt.arrow(x-10 ,y, dx,dy)
 
