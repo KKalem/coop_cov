@@ -151,7 +151,7 @@ if __name__ == "__main__":
 
     num_auvs = 5
     num_hooks = 5
-    hook_len = 200
+    hook_len = 100
     gap_between_rows = 10
     swath = 50
     target_threshold = 2
@@ -159,13 +159,15 @@ if __name__ == "__main__":
     dt = 0.5
     seed = 43
     std_shift = 0.4
-    std_consistent = 0.02
+    drift_mag = 0.02
     interact_period_ticks = 5
 
     max_ticks = 15000
 
-    consistent_x_drifts = [np.random.normal(0, std_consistent) for i in range(num_auvs)]
-    consistent_y_drifts = [np.random.normal(0, std_consistent) for i in range(num_auvs)]
+    consistent_drifts = []
+    for i in range(num_auvs):
+        _, d = geom.vec_normalize((np.random.random(2)-0.5)*2)
+        consistent_drifts.append(d*drift_mag)
 
     np.random.seed(seed)
 
@@ -212,8 +214,8 @@ if __name__ == "__main__":
             # move first
             for i,agent in enumerate(agents):
                 # enviromental drift
-                drift_x = np.random.normal(0, std_shift) + consistent_x_drifts[i]
-                drift_y = np.random.normal(0, std_shift) + consistent_y_drifts[i]
+                drift_x = np.random.normal(0, std_shift) + consistent_drifts[i][0]
+                drift_y = np.random.normal(0, std_shift) + consistent_drifts[i][1]
 
                 agent.update(dt,
                              drift_x = drift_x,
@@ -267,7 +269,7 @@ if __name__ == "__main__":
 
         ax.scatter(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
         ax.scatter(agent.internal_auv.pose_trace[:,0], agent.internal_auv.pose_trace[:,1], c=c, alpha=0.5, marker='+')
-        # ax.add_artist(Polygon(xy=auv.coverage_polygon(swath), closed=True, alpha=0.04, color=c, edgecolor=None))
+        ax.add_artist(Polygon(xy=auv.coverage_polygon(swath), closed=True, alpha=0.1, color=c, edgecolor=None))
 
         t = pg.odom_pose_trace
         plt.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
@@ -303,7 +305,11 @@ if __name__ == "__main__":
             plt.gca().add_patch(PathPatch(tp, color=c))
 
 
-    for agent, dx, dy in zip(agents, consistent_x_drifts, consistent_y_drifts):
+    for agent, d, c in zip(agents, consistent_drifts, colors):
+        _, nd = geom.vec_normalize(d)
+        nd *= swath
         x,y = agent.internal_auv.pose_trace[0][:2]
-        plt.arrow(x-10 ,y, dx,dy)
+        plt.arrow(x-(1.5*swath), y, nd[0], nd[1],
+                  color=c, length_includes_head=True,
+                  width=swath/20)
 
