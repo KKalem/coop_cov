@@ -7,6 +7,7 @@
 import numpy as np
 np.set_printoptions(formatter={'float': '{: 0.4f}'.format})
 from toolbox import geometry as geom
+from shapely.geometry import Polygon, LineString
 
 
 class AUV(object):
@@ -68,8 +69,8 @@ class AUV(object):
         if self.target_pos is None or self.pos is None:
             return False
 
-        diff = self.target_pos - self.pos
-        if abs(diff[0]) <= self.target_threshold and abs(diff[1]) <= self.target_threshold:
+        dist = geom.euclid_distance(self.target_pos, self.pos)
+        if dist <= self.target_threshold:
             return True
 
         return False
@@ -177,12 +178,17 @@ class AUV(object):
             self.target_pos = np.array(target_pos)
 
 
-    def coverage_polygon(self, swath):
+    def coverage_polygon(self, swath, shapely=False):
         # create a vector for each side of the swath
         # stack it up for each pose in the trace
         # then rotate this vector with heading of pose trace
         # and then displace it with pose trace position
         t = self.pose_trace
+        if shapely:
+            ls = LineString(t)
+            poly = ls.buffer(distance = swath/2., cap_style = 2) #flat
+            return poly
+
         len_trace = len(t)
         right_swath = np.array([[0,-swath/2]]*len_trace)
         left_swath = np.array([[0,swath/2]]*len_trace)
@@ -194,6 +200,8 @@ class AUV(object):
         right_swath[:,1] += t[:,1]
         poly = np.vstack((right_swath, np.flip(left_swath, axis=0)))
         return poly
+
+
 
 
     def update(self,
@@ -244,6 +252,7 @@ if __name__ == '__main__':
     print(f"Update rate:{i/(t1-t0)} updates per sec.")
 
     import matplotlib.pyplot as plt
+    from descartes import PolygonPatch
     try:
         __IPYTHON__
         plt.ion()
@@ -255,12 +264,12 @@ if __name__ == '__main__':
     plt.axis('equal')
     ax.plot(pt[:,0], pt[:,1])
 
-    from matplotlib.patches import Polygon
-
     poly = auv.coverage_polygon(swath=5)
-    p = Polygon(xy=poly, closed=True, alpha=0.1)
     ax.scatter(poly[:,0], poly[:,1], alpha=0.1)
-    ax.add_artist(p)
+    ax.fill(poly[:,0], poly[:,1], alpha=0.1)
+
+    spoly = auv.coverage_polygon(swath=5, shapely=True)
+    ax.add_patch(PolygonPatch(spoly, fc='r', ec='r', alpha=0.1))
 
 
 

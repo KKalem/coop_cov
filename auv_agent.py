@@ -10,6 +10,9 @@ from toolbox import geometry as geom
 from mission_plan import MissionPlan
 from pose_graph import PoseGraph
 from auv import AUV
+from pose_graph import PGO_VertexIdStore
+from mission_plan import construct_lawnmower_paths
+from tqdm import tqdm
 
 
 
@@ -123,7 +126,7 @@ class Agent(object):
         # if the connection status has changed, optimize the pose graph etc.
         if len(self.connection_trace) > 2:
             if self.connection_trace[-1] != self.connection_trace[-2]:
-                success = self.pg.optimize(save_before=True)
+                success = self.pg.optimize(save_before=False)
                 if success:
                     self.internal_auv.set_pose(self.pg.odom_tip_vertex.pose)
 
@@ -134,60 +137,55 @@ class Agent(object):
         travel = self._real_auv.distance_traveled
         final_error = geom.euclid_distance(self._real_auv.apose, self.internal_auv.apose)
         error = final_error / travel
-        self.log(f"Travel: {travel}, err:{final_error}")
+        self.log(f"Travel: {travel}, err:{final_error}, percent:{error*100}")
         return error
 
 
 
+class SimConfig:
+    def __init__(self,
+                 num_auvs,
+                 num_hooks,
+                 hook_len,
+                 gap_between_rows,
+                 swath,
+                 target_threshold,
+                 comm_dist,
+                 dt,
+                 seed,
+                 std_shift,
+                 drift_mag,
+                 interact_period_ticks,
+                 max_ticks):
+
+        # just read everything into object vars
+        args = locals()
+        for k,v in args.items():
+            self.__dict__[k] = v
 
 
+def construct_sim_objects(config):
+    id_store = PGO_VertexIdStore()
 
-if __name__ == "__main__":
-    from pose_graph import PGO_VertexIdStore
-    from mission_plan import construct_lawnmower_paths
-    from tqdm import tqdm
-    import signal
-
-
-    num_auvs = 5
-    num_hooks = 5
-    hook_len = 100
-    gap_between_rows = 10
-    swath = 50
-    target_threshold = 2
-    comm_dist = 50
-    dt = 0.5
-    seed = 43
-    std_shift = 0.4
-    drift_mag = 0.02
-    interact_period_ticks = 5
-
-    max_ticks = 15000
-
-    consistent_drifts = []
-    for i in range(num_auvs):
-        _, d = geom.vec_normalize((np.random.random(2)-0.5)*2)
-        consistent_drifts.append(d*drift_mag)
-
-    np.random.seed(seed)
-
-    paths = construct_lawnmower_paths(num_agents = num_auvs,
-                                      num_hooks=num_hooks,
-                                      hook_len=hook_len,
-                                      swath=swath,
-                                      gap_between_rows=gap_between_rows,
+    paths = construct_lawnmower_paths(num_agents = config.num_auvs,
+                                      num_hooks = config.num_hooks,
+                                      hook_len = config.hook_len,
+                                      swath = config.swath,
+                                      gap_between_rows = config.gap_between_rows,
                                       double_sided=False)
 
-    id_store = PGO_VertexIdStore()
+
+    init_poss = [p[0]-[config.swath,0] for p in paths]
+
 
     auvs = []
     pgs = []
     agents = []
     for i,path in enumerate(paths):
         auv = AUV(auv_id=i,
-                  init_pos = path[0],
-                  init_heading = 0,
-                  target_threshold=target_threshold)
+                  init_pos = init_poss[i],
+                  init_heading = 0.,
+                  target_threshold = config.target_threshold)
 
 
         pg = PoseGraph(pg_id = i,
@@ -202,8 +200,11 @@ if __name__ == "__main__":
         pgs.append(pg)
         agents.append(agent)
 
+    return auvs, pgs, agents, paths
 
 
+
+def run_sim(config, agents, consistent_drifts, paths, communication=True):
     done = False
     t = 0
     print("Running...")
@@ -213,22 +214,33 @@ if __name__ == "__main__":
             pbar.desc = f'Tick:{t}'
             # move first
             for i,agent in enumerate(agents):
-                # enviromental drift
-                drift_x = np.random.normal(0, std_shift) + consistent_drifts[i][0]
-                drift_y = np.random.normal(0, std_shift) + consistent_drifts[i][1]
+                # for the first WP, assume surface travel
+                # this just makes the plots look better
+                if agent.current_wp_idx == 0:
+                    drift_x = 0.
+                    drift_y = 0.
+                # same for the LAST WP too
+                elif agent.current_wp_idx == len(agent.waypoints)-1:
+                    drift_x = 0.
+                    drift_y = 0.
+                else:
+                    # enviromental drift
+                    drift_x = np.random.normal(0, config.std_shift) + consistent_drifts[i][0]
+                    drift_y = np.random.normal(0, config.std_shift) + consistent_drifts[i][1]
 
-                agent.update(dt,
+                agent.update(config.dt,
                              drift_x = drift_x,
                              drift_y = drift_y)
 
                 if agent.internal_auv.reached_target:
                     pbar.update(1)
 
-            # interact second
-            if t%5 == 0:
-                for agent in agents:
-                    agent.communicate(agents,
-                                      comm_dist)
+            if communication:
+                # interact second
+                if t%5 == 0:
+                    for agent in agents:
+                        agent.communicate(agents,
+                                          config.comm_dist)
 
             # check if done
             paths_done = [agent.waypoints_exhausted for agent in agents]
@@ -236,21 +248,59 @@ if __name__ == "__main__":
                 print("Paths done")
                 break
 
-            if t >= max_ticks:
+            if t >= config.max_ticks:
                 print("Max ticks reached")
                 break
 
     print("...Done")
-
     errs = [a.distance_traveled_error() for a in agents]
     print(f"Distance traveled errors: {errs}")
+    return errs, t
 
 
-    print("Plotting...")
+if __name__ == "__main__":
+
+    config = SimConfig(
+        num_auvs = 5,
+        num_hooks = 5,
+        hook_len = 100,
+        gap_between_rows = 10,
+        swath = 50,
+        target_threshold = 2,
+        comm_dist = 50,
+        dt = 0.5,
+        seed = 43,
+        std_shift = 0.4,
+        drift_mag = 0.02,
+        interact_period_ticks = 5,
+        max_ticks = 15000
+    )
+
+    np.random.seed(config.seed)
+
+    consistent_drifts = []
+    for i in range(config.num_auvs):
+        _, d = geom.vec_normalize((np.random.random(2)-0.5)*2)
+        consistent_drifts.append(d * config.drift_mag)
+
+
+    auvs, pgs, agents, paths = construct_sim_objects(config)
+    errs, ticks = run_sim(config = config,
+                          agents = agents,
+                          consistent_drifts = consistent_drifts,
+                          paths = paths,
+                          communication=True)
+
+
+
+
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, PathPatch
     from matplotlib.collections import LineCollection
     from matplotlib.textpath import TextPath
+    from descartes import PolygonPatch
+    print("Plotting...")
+    plot_pg = False
 
     try:
         __IPYTHON__
@@ -261,55 +311,61 @@ if __name__ == "__main__":
     colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
     fig, ax = plt.subplots(1,1)
     plt.axis('equal')
+
+    # plot the plan
     for path in paths:
         p = np.array(path)
         plt.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
 
     for c, agent, pg, auv in zip(colors, agents, pgs, auvs):
 
-        ax.scatter(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
+        ax.plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
         ax.scatter(agent.internal_auv.pose_trace[:,0], agent.internal_auv.pose_trace[:,1], c=c, alpha=0.5, marker='+')
-        ax.add_artist(Polygon(xy=auv.coverage_polygon(swath), closed=True, alpha=0.1, color=c, edgecolor=None))
+
+        poly = auv.coverage_polygon(config.swath, shapely=True)
+        ax.add_artist(PolygonPatch(poly, alpha=0.1, fc=c, ec=c))
 
         t = pg.odom_pose_trace
         plt.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
-        for p in pg.fixed_poses:
-            plt.text(p[0], p[1], 'F', c=c)
+        if plot_pg:
+            for p in pg.fixed_poses:
+                plt.text(p[0], p[1], 'F', c=c)
 
-        for edge in pg.measured_edges:
-            p1 = edge.parent_pose
-            p2 = edge.child_pose
-            diff = p2-p1
-            plt.arrow(p1[0], p1[1], diff[0], diff[1],
-                      alpha=0.3, color=c, head_width=0.5, shape='left',
-                      length_includes_head=True)
+            for edge in pg.measured_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                diff = p2-p1
+                plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                          alpha=0.3, color=c, head_width=0.5, shape='left',
+                          length_includes_head=True)
 
-        for edge in pg.self_odom_edges:
-            p1 = edge.parent_pose
-            p2 = edge.child_pose
-            diff = p2-p1
-            plt.arrow(p1[0], p1[1], diff[0], diff[1],
-                      alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
+            for edge in pg.self_odom_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                diff = p2-p1
+                plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                          alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
 
-        pg_marker = ' '*pg.pg_id + 'f'
-        for p in pg.foreign_poses:
-            tp = TextPath(p[:2], pg_marker, size=0.1)
-            plt.gca().add_patch(PathPatch(tp, color=c))
+            pg_marker = ' '*pg.pg_id + 'f'
+            for p in pg.foreign_poses:
+                tp = TextPath(p[:2], pg_marker, size=0.1)
+                plt.gca().add_patch(PathPatch(tp, color=c))
 
-        for edge in pg.foreign_edges:
-            p1 = edge.parent_pose
-            p2 = edge.child_pose
-            p = (p2+p1)/2
-            tp = TextPath(p[:2], pg_marker, size=0.1)
-            plt.gca().add_patch(PathPatch(tp, color=c))
+            for edge in pg.foreign_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                p = (p2+p1)/2
+                tp = TextPath(p[:2], pg_marker, size=0.1)
+                plt.gca().add_patch(PathPatch(tp, color=c))
 
 
     for agent, d, c in zip(agents, consistent_drifts, colors):
         _, nd = geom.vec_normalize(d)
-        nd *= swath
+        nd *= config.swath
         x,y = agent.internal_auv.pose_trace[0][:2]
-        plt.arrow(x-(1.5*swath), y, nd[0], nd[1],
-                  color=c, length_includes_head=True,
-                  width=swath/20)
+        plt.arrow(x-(1.5 * config.swath), y, nd[0], nd[1],
+                  color = c,
+                  length_includes_head = True,
+                  width = config.swath/20)
 
