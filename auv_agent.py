@@ -75,7 +75,13 @@ class Agent(object):
 
 
         current_wp = self.waypoints[self.current_wp_idx]
-        self.internal_auv.set_target(current_wp)
+        cover = False
+        # where are we within a hook?
+        # each hook is 5 wps.
+        if self.current_wp_idx%5 in [1,3]:
+            cover=True
+
+        self.internal_auv.set_target(current_wp, cover=cover)
 
         # control real auv with what the internal one thinks
         td, ta = self.internal_auv.update(dt)
@@ -84,7 +90,8 @@ class Agent(object):
                               turn_amount = ta,
                               drift_x = drift_x,
                               drift_y = drift_y,
-                              drift_heading = drift_heading)
+                              drift_heading = drift_heading,
+                              cover = cover)
 
         # compass is good
         self.internal_auv.set_heading(self._real_auv.heading)
@@ -266,6 +273,7 @@ if __name__ == "__main__":
         hook_len = 100,
         gap_between_rows = 10,
         swath = 50,
+        beam_radius = 1,
         target_threshold = 2,
         comm_dist = 50,
         dt = 0.5,
@@ -322,8 +330,22 @@ if __name__ == "__main__":
         ax.plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
         ax.scatter(agent.internal_auv.pose_trace[:,0], agent.internal_auv.pose_trace[:,1], c=c, alpha=0.5, marker='+')
 
-        poly = auv.coverage_polygon(config.swath, shapely=True)
-        ax.add_artist(PolygonPatch(poly, alpha=0.1, fc=c, ec=c))
+        polies = auv.coverage_polygon(config.swath,
+                                      shapely = True,
+                                      beam_radius = config.beam_radius)
+        for poly in polies:
+            ax.add_artist(PolygonPatch(poly, alpha=0.1, fc=c, ec=c))
+
+        # for lines instead
+        # polies = auv.coverage_polygon(config.swath, shapely=False)
+        # for poly in polies:
+            # mid = int(len(poly)/2)
+            # s1 = poly[:mid]
+            # s2 = poly[mid:]
+            # for i in range(mid):
+                # xs = [s1[i][0], s2[-i-1][0]]
+                # ys = [s1[i][1], s2[-i-1][1]]
+                # plt.plot(xs, ys, c=c, alpha=0.2)
 
         t = pg.odom_pose_trace
         plt.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)

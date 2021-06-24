@@ -7,7 +7,7 @@
 import numpy as np
 np.set_printoptions(formatter={'float': '{: 0.4f}'.format})
 from toolbox import geometry as geom
-from shapely.geometry import Polygon, LineString
+from shapely.geometry import Polygon, LineString, MultiLineString
 
 
 class AUV(object):
@@ -41,6 +41,9 @@ class AUV(object):
         self.max_turn_angle = max_turn_angle
 
         self._pose_trace = []
+        # for each pose, are we doing coverage?
+        self._coverage_trace = []
+        self.covering = False
         self.pose = [self.pos[0], self.pos[1], self.heading]
 
         self.target_pos = None
@@ -171,35 +174,56 @@ class AUV(object):
         # self.log(f"Set pose {old_pose} -> {np.array(self.pose)}")
 
 
-    def set_target(self, target_pos):
+    def set_target(self, target_pos, cover=True):
         if target_pos is None:
             self.target_pos = None
+            self.covering = False
         else:
             self.target_pos = np.array(target_pos)
+            self.covering = cover
 
 
-    def coverage_polygon(self, swath, shapely=False):
+    def coverage_polygon(self, swath, shapely=False, beam_radius=1):
         # create a vector for each side of the swath
         # stack it up for each pose in the trace
         # then rotate this vector with heading of pose trace
         # and then displace it with pose trace position
         t = self.pose_trace
-        if shapely:
-            ls = LineString(t)
-            poly = ls.buffer(distance = swath/2., cap_style = 2) #flat
-            return poly
+        disjoints = [[]]
+        for i, covering in enumerate(self._coverage_trace):
+            if covering:
+                disjoints[-1].append(t[i])
+            elif len(disjoints[-1]) > 0:
+                disjoints.append([])
 
-        len_trace = len(t)
-        right_swath = np.array([[0,-swath/2]]*len_trace)
-        left_swath = np.array([[0,swath/2]]*len_trace)
-        left_swath = geom.vec2_rotate(left_swath, t[:,2])
-        right_swath = geom.vec2_rotate(right_swath, t[:,2])
-        left_swath[:,0] += t[:,0]
-        left_swath[:,1] += t[:,1]
-        right_swath[:,0] += t[:,0]
-        right_swath[:,1] += t[:,1]
-        poly = np.vstack((right_swath, np.flip(left_swath, axis=0)))
-        return poly
+        polies = []
+        for t in disjoints:
+            if len(t) < 2:
+                continue
+
+            len_trace = len(t)
+            t = np.array(t)
+            right_swath = np.array([[0,-swath/2]]*len_trace)
+            left_swath = np.array([[0,swath/2]]*len_trace)
+            left_swath = geom.vec2_rotate(left_swath, t[:,2])
+            right_swath = geom.vec2_rotate(right_swath, t[:,2])
+            left_swath[:,0] += t[:,0]
+            left_swath[:,1] += t[:,1]
+            right_swath[:,0] += t[:,0]
+            right_swath[:,1] += t[:,1]
+            if not shapely:
+                poly = np.vstack((right_swath, np.flip(left_swath, axis=0)))
+                polies.append(poly)
+            else:
+                lines = list(zip(right_swath, left_swath))
+                mls = MultiLineString(lines)
+                poly = mls.buffer(distance = beam_radius,
+                                  cap_style = 1)
+                polies.append(poly)
+
+
+
+        return polies
 
 
 
@@ -210,7 +234,8 @@ class AUV(object):
                turn_amount = None,
                drift_x = 0.,
                drift_y = 0.,
-               drift_heading = 0.
+               drift_heading = 0.,
+               cover=None
                ):
         """
         the auv always moves forward at max speed and turns at max speed, so the only
@@ -228,6 +253,10 @@ class AUV(object):
 
         self.pose = [self.pos[0], self.pos[1], self.heading]
         self._pose_trace.append(self.pose)
+        if cover is None:
+            self._coverage_trace.append(self.covering)
+        else:
+            self._coverage_trace.append(cover)
 
         return td, tu
 
@@ -264,12 +293,14 @@ if __name__ == '__main__':
     plt.axis('equal')
     ax.plot(pt[:,0], pt[:,1])
 
-    poly = auv.coverage_polygon(swath=5)
-    ax.scatter(poly[:,0], poly[:,1], alpha=0.1)
-    ax.fill(poly[:,0], poly[:,1], alpha=0.1)
+    polies = auv.coverage_polygon(swath=5)
+    for poly in polies:
+        ax.scatter(poly[:,0], poly[:,1], alpha=0.1)
+        ax.fill(poly[:,0], poly[:,1], alpha=0.1)
 
-    spoly = auv.coverage_polygon(swath=5, shapely=True)
-    ax.add_patch(PolygonPatch(spoly, fc='r', ec='r', alpha=0.1))
+    spolies = auv.coverage_polygon(swath=5, shapely=True)
+    for spoly in spolies:
+        ax.add_patch(PolygonPatch(spoly, fc='r', ec='r', alpha=0.1))
 
 
 
