@@ -218,7 +218,7 @@ class AUV(object):
                 lines = list(zip(right_swath, left_swath))
                 mls = MultiLineString(lines)
                 poly = mls.buffer(distance = beam_radius,
-                                  cap_style = 1)
+                                  cap_style = 2)
                 polies.append(poly)
 
 
