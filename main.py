@@ -3,693 +3,463 @@
 # vim:fenc=utf-8
 # Ozer Ozkahraman (ozero@kth.se)
 
-import signal
-import subprocess
-import time
-import sys
-import os
-import glob
-import shutil
+import matplotlib.pyplot as plt
+from matplotlib.patches import PathPatch
+from matplotlib.collections import LineCollection
+from matplotlib.textpath import TextPath
+from descartes import PolygonPatch
+plt.rcParams['pdf.fonttype'] = 42
+
+from multiprocessing import Pool
 import json
+
 import numpy as np
-np.set_printoptions(formatter={'float': '{: 0.4f}'.format})
-
-from termcolor import colored
-
-from functools import reduce
+from shapely.ops import unary_union
+from shapely.geometry import Polygon
+from tqdm import tqdm
 
 from toolbox import geometry as geom
-
+from mission_plan import MissionPlan
+from pose_graph import PoseGraph, PGO_VertexIdStore
 from auv import AUV
-from auv_agent import AUVAgent, AUVAction
-from pose_graph import PoseGraphOptimization, PGO_VertexIdStore
 from mission_plan import construct_lawnmower_paths
+from auv_agent import Agent
 
 
-def sigint_handler(sig, frame):
-    print('Stopping')
-    global STOP
-    STOP = True
+class SimConfig:
+    def __init__(self,
+                 communication,
+                 num_auvs,
+                 num_hooks,
+                 hook_len,
+                 gap_between_rows,
+                 swath,
+                 beam_radius,
+                 target_threshold,
+                 comm_dist,
+                 dt,
+                 seed,
+                 std_shift,
+                 drift_mag,
+                 interact_period_ticks,
+                 max_ticks):
+
+        # just read everything into object vars
+        self.args = locals()
+        for k,v in self.args.items():
+            self.__dict__[k] = v
+
+    def save_json(self, filename):
+        with open(filename) as f:
+            json.dump(self.args, f)
 
 
-def get_next_data_folder(mission_type, data_folder_name='data'):
-    cwd = os.getcwd()
-    data_dir = os.path.join(cwd, data_folder_name)
-    existing_dirs = os.listdir(data_dir)
 
-    exp_folder = f'{mission_type}_{len(existing_dirs)}'
-    i = 1
-    while exp_folder in existing_dirs:
-        exp_folder = f'{mission_type}_{len(existing_dirs)+i}'
-        i+=1
+def construct_sim_objects(config):
+    id_store = PGO_VertexIdStore()
 
-    next_folder = os.path.join(data_dir, exp_folder)
-    os.mkdir(next_folder)
-    return next_folder
+    paths = construct_lawnmower_paths(num_agents = config.num_auvs,
+                                      num_hooks = config.num_hooks,
+                                      hook_len = config.hook_len,
+                                      swath = config.swath,
+                                      gap_between_rows = config.gap_between_rows,
+                                      double_sided=False)
 
 
-
-if __name__=="__main__":
-    try:
-        config_file = sys.argv[1]
-        print(f"Using config file:{sys.argv[1]}")
-    except:
-        config_file = 'manual_config.json'
-        print("Using manual_config.json")
-
-    with open(config_file, 'r') as f:
-        config = json.load(f)
+    init_poss = [p[0]-[config.swath,0] for p in paths]
 
 
-    print("CONFIG:")
-    print(config)
+    auvs = []
+    pgs = []
+    agents = []
+    for i,path in enumerate(paths):
+        auv = AUV(auv_id=i,
+                  init_pos = init_poss[i],
+                  init_heading = 0.,
+                  target_threshold = config.target_threshold)
 
-    MISSION_TYPE = config.get('mission_type', 'tri')
-    seed = config.get('seed', 42)
-    std_shift = config.get('std_shift', 1.0)
-    std_heading = config.get('std_heading', 1.0)
-    exp_folder = config.get('exp_folder', 'manual')
-    swath = config.get('swath', 50)
-    flower_type = config.get('flower_type', 'circle')
-    num_petals = config.get("num_flower_petals", 2)
-    num_flower_depth = config.get("num_flower_depth", 2)
-    comms_range = config.get('comms_range', 50)
-    max_timesteps = config.get('max_timesteps', None)
-    enable_gps_when_lost = config.get('enable_gps_when_lost', False)
-    BATCH_MODE = config.get('batch_mode', False)
-    data_folder_name = config.get('data_folder_name', 'manual')
-    enable_merging_pgos = config.get('enable_merging_pgos', False)
-    enable_gossip = config.get('enable_gossip', False)
-    enable_longrange_when_landed = config.get('enable_longrange_when_landed', False)
-    enable_flower_loop_closures = config.get('enable_flower_loop_closures', False)
-    enable_measure_all_agents = config.get('enable_measure_all_agents', False)
-    num_lawn_auvs = config.get('num_lawn_auvs', 6)
-    double_sided_lawn = config.get('double_sided_lawn', True)
-    enable_consistent_drift = config.get('enable_consistent_drift', False)
-    max_drift_magnitude = config.get('max_drift_magnitude', 0)
-    do_triangles_between_flowers = config.get('do_triangles_between_flowers', True)
 
+        pg = PoseGraph(pg_id = i,
+                       id_store = id_store)
+
+        agent = Agent(real_auv = auv,
+                      pose_graph = pg,
+                      waypoints = path)
+
+
+        auvs.append(auv)
+        pgs.append(pg)
+        agents.append(agent)
+
+    return auvs, pgs, agents, paths
+
+
+
+def run_sim(config, agents, consistent_drifts, paths, communication=True):
+    done = False
+    t = 0
+    print("Running...")
+    with tqdm(total=paths.shape[0]*paths.shape[1]) as pbar:
+        while True:
+            t += 1
+            pbar.desc = f'Tick:{t}'
+            # move first
+            for i,agent in enumerate(agents):
+                # for the first WP, assume surface travel
+                # this just makes the plots look better
+                if agent.current_wp_idx == 0:
+                    drift_x = 0.
+                    drift_y = 0.
+                # same for the LAST WP too
+                elif agent.current_wp_idx == len(agent.waypoints)-1:
+                    drift_x = 0.
+                    drift_y = 0.
+                else:
+                    # enviromental drift
+                    drift_x = np.random.normal(0, config.std_shift) + consistent_drifts[i][0]
+                    drift_y = np.random.normal(0, config.std_shift) + consistent_drifts[i][1]
+
+                agent.update(config.dt,
+                             drift_x = drift_x,
+                             drift_y = drift_y)
+
+                if agent.internal_auv.reached_target:
+                    pbar.update(1)
+
+            if communication:
+                # interact second
+                if t%5 == 0:
+                    for agent in agents:
+                        agent.communicate(agents,
+                                          config.comm_dist)
+
+            # check if done
+            paths_done = [agent.waypoints_exhausted for agent in agents]
+            if all(paths_done):
+                print("Paths done")
+                break
+
+            if t >= config.max_ticks:
+                print("Max ticks reached")
+                break
+
+    print("...Done")
+    errs = [a.distance_traveled_error() for a in agents]
+    print(f"Distance traveled errors: {errs}")
+    return errs, t
+
+
+def plot_coverage(ax,
+                  config,
+                  paths,
+                  agents,
+                  pgs,
+                  auvs,
+                  consistent_drifts,
+                  coverage_polies,
+                  plot_pg=False):
+    print("Plotting...")
     try:
         __IPYTHON__
-        IPYTHON = True
-    except:
-        IPYTHON = False
-
-
-
-    try:
-        full_exp_folder = config.get('exp_folder')
-        os.makedirs(full_exp_folder, exist_ok=True)
-    except:
-        full_exp_folder = get_next_data_folder(MISSION_TYPE, data_folder_name)
-
-    # clear out this debug folder everytime just in case some stuff arent over-written from
-    # previous runs. 
-    # this is not a problem for batch mode since those create new folders for each seed etc.
-    if full_exp_folder == 'debug':
-        files = glob.glob(f'{full_exp_folder}/*')
-        for f in files:
-            os.remove(f)
-        print("Deleted stuff in debug/")
-
-
-
-
-
-
-
-    # fix seed
-    np.random.seed(seed)
-
-    # so that we can stop early and still save and plot stuff
-    STOP = False
-    signal.signal(signal.SIGINT, sigint_handler)
-
-    try:
-        plt.cla()
+        plt.ion()
     except:
         pass
+    colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
 
-    consistent_x_drift = 0
-    consistent_y_drift = 0
-    if enable_consistent_drift:
-        consistent_x_drift = max_drift_magnitude*2*(np.random.rand() - 0.5)
-        consistent_y_drift = max_drift_magnitude*2*(np.random.rand() - 0.5)
+    # plot the plan
+    for path in paths:
+        p = np.array(path)
+        ax.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
 
+    for c, polies in zip(colors, coverage_polies):
+        for poly in polies:
+            ax.add_artist(PolygonPatch(poly, alpha=0.1, fc=c, ec=c))
 
-    # time duration in seconds per update
-    dt = 0.5
-    px_per_m = 0.1
-    # in meters
-    target_threshold = 3
-    auv_length = 1.5
-    auv_speed = 1.5
-    landmark_detection_range = swath
+    for c, agent, pg, auv in zip(colors, agents, pgs, auvs):
 
-
-    if max_timesteps is None:
-        # total time to simulate, in seconds
-        total_time_hours = 8
-        total_time_mins = total_time_hours*60
-        total_time = total_time_mins*60
-        num_dts = int(total_time/dt)
-    else:
-        num_dts = max_timesteps
-
-    optimize_pgo_live = True
-    summarize_pgo = False
+        ax.plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
+        ax.plot(agent.internal_auv.pose_trace[:,0], agent.internal_auv.pose_trace[:,1],
+                c=c, alpha=0.5, linestyle='--')
 
 
-    ########################################
-    # LAWNMOWER PARAMS
-    ########################################
-    if MISSION_TYPE == 'lawn':
-        num_lawnmower_hooks = 20
-        num_auvs = num_lawn_auvs
-        lawnmower_hook_len = 100
+        # for lines instead
+        # polies = auv.coverage_polygon(config.swath, shapely=False)
+        # for poly in polies:
+            # mid = int(len(poly)/2)
+            # s1 = poly[:mid]
+            # s2 = poly[mid:]
+            # for i in range(mid):
+                # xs = [s1[i][0], s2[-i-1][0]]
+                # ys = [s1[i][1], s2[-i-1][1]]
+                # plt.plot(xs, ys, c=c, alpha=0.2)
 
-        # set this because eh...
-        num_auvs_per_coven = 1
+        t = pg.odom_pose_trace
+        ax.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
+        if plot_pg:
+            for p in pg.fixed_poses:
+                ax.text(p[0], p[1], 'F', c=c)
 
+            for edge in pg.measured_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                diff = p2-p1
+                ax.arrow(p1[0], p1[1], diff[0], diff[1],
+                          alpha=0.3, color=c, head_width=0.5, shape='left',
+                          length_includes_head=True)
 
-
-    ########################################
-    # TRIS PARAMS
-    ########################################
-    if MISSION_TYPE == 'tri':
-        num_coverage_triangles = 10
-        num_auvs_per_coven = 2
-        num_auvs = 6
-
-        # this is a function of swath and how many swaths
-        # of coverage each coven will do
-        coven_radius = num_flower_depth*swath
-
-
-
-
-
-
-    ########################################
-    # EKF PARAMS
-    ########################################
-    # std. deviations of
-    # velocity measurement
-    std_vel = 0.05
-    # heading measurement
-    std_steer = np.radians(.005)
-    # range measurement to landmark
-    std_range=0.01
-    # bearing measurement to landmark
-    std_bearing=0.01
-    # update some things every N seconds
-    periodic_update_period = 1
-    periodic_update_period_dts = int(periodic_update_period / dt)
+            for edge in pg.self_odom_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                diff = p2-p1
+                ax.arrow(p1[0], p1[1], diff[0], diff[1],
+                          alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
 
+            pg_marker = ' '*pg.pg_id + 'f'
+            for p in pg.foreign_poses:
+                tp = TextPath(p[:2], pg_marker, size=0.1)
+                ax.add_patch(PathPatch(tp, color=c))
+
+            for edge in pg.foreign_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                p = (p2+p1)/2
+                tp = TextPath(p[:2], pg_marker, size=0.1)
+                ax.add_patch(PathPatch(tp, color=c))
 
 
-
-    # kalman filters for continous predictions
-    ekf_params = {'wheelbase':auv_length,
-                  'std_vel':std_vel,
-                  'std_steer':std_steer,
-                  'std_range':std_range,
-                  'std_bearing':std_bearing,
-                  'dt':dt}
-
-
-    # a common store of vertex ids for the pose graphs.
-    # this way, every agent can get unique ids all the time easily
-    # makes merging graphs easier
-    pgo_id_store = PGO_VertexIdStore()
+    for agent, d, c in zip(agents, consistent_drifts, colors):
+        _, nd = geom.vec_normalize(d)
+        nd *= config.swath
+        x,y = agent.internal_auv.pose_trace[0][:2]
+        x -= (1.5 * config.swath)
+        ax.arrow(x, y, nd[0], nd[1],
+                  color = c,
+                  length_includes_head = True,
+                  width = config.swath/20)
+        ax.scatter(x- (1.5*config.swath) ,y, alpha=0)
 
 
+def run(config, plot=True, show_plot=False, save_plot=True):
+    np.random.seed(config.seed)
 
-    #  landmarks = [(pgo_id_store.get_new_id(),[0,0])]
-    landmarks = []
-
-    if MISSION_TYPE == 'lawn':
-        lawnmower_paths = construct_lawnmower_paths(num_agents = num_auvs,
-                                                    num_hooks = num_lawnmower_hooks,
-                                                    hook_len = lawnmower_hook_len,
-                                                    swath = swath,
-                                                    double_sided = double_sided_lawn)
-        init_positions = [p[0] for p in lawnmower_paths]
-
-        stacked = np.vstack(lawnmower_paths)
-        x_min, y_min = np.min(stacked, axis=0)
-        x_max, y_max = np.max(stacked, axis=0)
-        x_radius = max(abs(x_min), abs(x_max))
-        y_radius = max(abs(y_min), abs(y_max))
-        radius = max(x_radius, y_radius)
-
-        map_size = radius*2 + swath*5
-        map_xsize = map_size
-        map_ysize = map_size
+    consistent_drifts = []
+    for i in range(config.num_auvs):
+        _, d = geom.vec_normalize((np.random.random(2)-0.5)*2)
+        consistent_drifts.append(d * config.drift_mag)
 
 
-
-
-    if MISSION_TYPE == 'tri':
-        # create the main mission controller
-        # the radius in which we assume a single coven will cover
-        warlock = Warlock(coven_radius = coven_radius,
-                          num_coverage_triangles = num_coverage_triangles,
-                          do_triangles_between_flowers = do_triangles_between_flowers)
-
-        init_positions = warlock.init_coords
-        covens = []
-
-        map_size = warlock.mission_radius * 2 + swath*5
-        map_xsize = map_size
-        map_ysize = map_size
-
-
-    map_params = {'xsize':map_xsize,
-                  'ysize':map_ysize,
-                  'px_per_m':px_per_m}
-
-    # a map with some features in it
-    env_map = ScalarMap(**map_params)
-
-
-    if std_shift <= 0.00001:
-        optimize_pgo_live = False
-
-    all_auvs = []
-    all_agents = []
-    for i, init_pos in enumerate(init_positions):
-        # the physical, real auvs to be simulated
-        auvs = []
-        for _ in range(num_auvs_per_coven):
-            auv = AUV(auv_id = len(all_auvs),
-                      init_pos = np.array(init_pos),
-                      init_heading = 0.,
-                      swath = swath,
-                      forward_speed = auv_speed,
-                      auv_length = auv_length,
-                      max_turn_angle = 35.,
-                      map_params = map_params)
-            all_auvs.append(auv)
-            auvs.append(auv)
-
-
-        # the 'brain's of the operation
-        agents = [AUVAgent(auv = auv.clone(),
-                           landmarks = landmarks,
-                           ekf_params = ekf_params,
-                           pgo_id_store = pgo_id_store,
-                           optimize_pgo_live = optimize_pgo_live,
-                           summarize_pgo = summarize_pgo,
-                           landmark_detection_range = landmark_detection_range,
-                           target_threshold = target_threshold,
-                           enable_gps_when_lost = enable_gps_when_lost,
-                           enable_gossip = enable_gossip,
-                           enable_longrange_when_landed = enable_longrange_when_landed,
-                           enable_merging_pgos = enable_merging_pgos,
-                           enable_measure_all_agents = enable_measure_all_agents,
-                           disable_logs = BATCH_MODE,
-                           comms_range = comms_range) for auv in auvs]
-        all_agents.extend(agents)
-
-        if MISSION_TYPE == 'tri':
-            # create the group controller
-            coven = Coven(coven_id = i,
+    # run the sim
+    auvs, pgs, agents, paths = construct_sim_objects(config)
+    errs, ticks = run_sim(config = config,
                           agents = agents,
-                          num_petals = num_petals,
-                          coven_radius = coven_radius,
-                          comms_range = comms_range,
-                          enable_flower_loop_closures = enable_flower_loop_closures)
+                          consistent_drifts = consistent_drifts,
+                          paths = paths,
+                          communication = config.communication)
 
-            covens.append(coven)
+    # create the polygons for the coveages and such
+    coverage_polies = []
+    for auv in auvs:
+        polies = auv.coverage_polygon(config.swath,
+                                      shapely = True,
+                                      beam_radius = config.beam_radius)
+        coverage_polies.append(polies)
+    flat_coverage_polies = [item for sublist in coverage_polies for item in sublist]
 
-
-    if MISSION_TYPE == 'tri':
-        # and _FINALLY_ a controller to control the multiple covens!
-        # BAYYM
-        warlock.init_covens(covens)
-
-    if MISSION_TYPE == 'lawn':
-        for agent, path in zip(all_agents, lawnmower_paths):
-            action = AUVAction()
-            for p in path[:-1]:
-                action.add_wp(p, 'moving')
-            action.add_wp(path[-1], 'done')
-            agent.planned_actions.append(action)
-
-
-    # keep track of the pose error on every tick
-    # for all agents
-    pose_diffs = [[] for i in all_agents]
+    predicted_polies = []
+    for auv,pg in zip(auvs, pgs):
+        polies = auv.coverage_polygon(swath = config.swath,
+                                      pg = pg,
+                                      shapely = True,
+                                      beam_radius = config.beam_radius)
+        predicted_polies.append(polies)
+    predicted_polies = [item for sublist in predicted_polies for item in sublist]
 
 
 
-    timings = []
-    last_agent_states = ''
+    intended_coverages = []
+    for path in paths:
+        # ignore the last point because its a "get out" point, no coverage there
+        minx, miny = np.min(path[:-1], axis=0)
+        maxx, maxy = np.max(path[:-1], axis=0)
+        # not just the path, but _around_ the path
+        # assuming the coverage is done east to west
+        minx -= config.swath/2
+        maxx += config.swath/2
+        rect = Polygon(shell=[(minx, miny),
+                              (minx, maxy),
+                              (maxx, maxy),
+                              (maxx, miny)])
+        intended_coverages.append(rect)
 
-    t0 = time.time()
-
-    last_update_time = 0
-    total_simulation_steps = 0
-    for t in range(0,num_dts):
-        total_simulation_steps += 1
-        if STOP:
-            print(colored(f'Stopped manually at {t*dt}s', 'red'))
-            break
-
-        t00 = time.time()
-        new_agent_states = f'agents:{[a.state for a in all_agents]}====='
-        if new_agent_states != last_agent_states:
-            print(colored(f'======={t}:{new_agent_states}=======', 'green'))
-            last_agent_states = new_agent_states
-            last_update_time = time.time()
-
-        if time.time() - last_update_time > 10:
-            print(colored(f'======={t}:{new_agent_states}=======', 'green'))
-            waiting_times = [a.waiting_clock for a in all_agents]
-            print(f'Waiting times:{waiting_times}')
-            gps_states = [a.got_gps_when_landed for a in all_agents]
-            print(f'Got gps when landed:{gps_states}')
-            last_update_time = time.time()
-
-        for agent, auv, pose_diff in zip(all_agents, all_auvs, pose_diffs):
-
-            # update from the compass before anything
-            compass_drift = np.random.normal(0,1) # in degrees
-            read_heading = auv.heading + compass_drift # in degrees
-            agent.read_compass(read_heading)
-
-            # single time step update
-            # decide where to turn
-            turn = agent.update(dt,
-                                env_map = env_map,
-                                real_auv = auv,
-                                all_agents = all_agents,
-                                all_auvs = all_auvs)
-
-            # physically do the move
-            # with some errors of course, the agent doesnt know these
-            drift_x = np.random.normal(0, std_shift) + consistent_x_drift
-            drift_y = np.random.normal(0, std_shift) + consistent_y_drift
-            drift_heading = np.random.normal(0, std_heading)
-            auv.update(dt,
-                       turn_direction=turn,
-                       env_map=env_map,
-                       drift_x = drift_x,
-                       drift_y = drift_y,
-                       drift_heading = drift_heading)
+    # calculate some stats for the mission
+    intended_coverage = unary_union(intended_coverages)
+    actually_covered = unary_union(flat_coverage_polies)
+    predicted_polies = unary_union(predicted_polies)
+    missed_area = intended_coverage - actually_covered
+    unplanned_area = actually_covered - intended_coverage
+    coverage_within_plan = actually_covered & intended_coverage
+    planned_coverage_percent = 100* coverage_within_plan.area / intended_coverage.area
+    total_travel = sum([a.distance_traveled for a in auvs])
+    # accuracy of predicted coverage?
+    true_positive_percent = 100* ((actually_covered & predicted_polies).area / predicted_polies.area)
+    print(f"Missed = {missed_area.area} m2")
+    print(f"Covered = {planned_coverage_percent}% of the planned area")
+    print(f"Total travel = {total_travel} m")
+    print(f"True positive percent = {true_positive_percent}%")
 
 
-            # update the pose graph with odom
-            agent.add_odom_edge_to_pgo()
+    results = {
+        "missed":missed_area.area,
+        "covered_percent":planned_coverage_percent,
+        "total_travel":total_travel,
+        "covered_inside":coverage_within_plan.area,
+        "final_distance_traveled_errs":errs,
+        "true_positive_percent":true_positive_percent
+    }
 
 
-            # periodic updates
-            if t % periodic_update_period_dts == 0:
-                # external sensing
-                agent.add_landmark_edge_to_pgo(auv)
-                #  agent.update_ekf()
-                #  agent.update_ekf_landmarks(auv)
+    if plot:
+        # FIGURES WOOO
+        fig, axs = plt.subplots(1,2, sharex=True, sharey=True)
+        fig.set_size_inches(10,5)
 
-                # inter-agent interactions
-                agent.interact_with_other_agents(all_agents, all_auvs, auv)
+        # axs[1].add_artist(PolygonPatch(intended_coverage, alpha=0.5, fc='grey', ec='grey'))
+        axs[1].add_artist(PolygonPatch(actually_covered, alpha=0.5, fc='green', ec='green'))
+        axs[1].add_artist(PolygonPatch(missed_area, alpha=0.5, fc='red', ec='red'))
+        axs[1].add_artist(PolygonPatch(unplanned_area, alpha=0.5, fc='blue', ec='blue'))
+        for agent, pg, auv in zip(agents, pgs, auvs):
+            axs[1].plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c='black', alpha=0.5)
 
-
-            # error collection
-            pos_diff = auv.pos - agent.auv.pos
-            heading_diff = auv.heading - agent.auv.heading
-            pose_diff.append((pos_diff[0], pos_diff[1], heading_diff))
-
-
-
-        if MISSION_TYPE == 'tri':
-            # also update the group controllers
-            # this should not cause any physical state changes
-            for coven in covens:
-                coven.update()
-
-            warlock.update()
-
-        t11 = time.time()
-        timings.append(t11-t00)
+        plot_coverage(axs[0],
+                      config=config,
+                      paths=paths,
+                      agents=agents,
+                      pgs=pgs,
+                      auvs=auvs,
+                      coverage_polies=coverage_polies,
+                      consistent_drifts=consistent_drifts,
+                      plot_pg=False)
 
 
-        if MISSION_TYPE == 'tri':
-            # stop sim if all agents completed their plans
-            if warlock.state in ['done', 'lost'] or \
-               all([c.state == 'done' for c in covens]):
-                break
+        axs[0].set_xlabel('x[m]')
+        axs[1].set_xlabel('x[m]')
+        axs[0].set_ylabel('y[m]')
 
-        if MISSION_TYPE == 'lawn':
-            if all([a.state == 'done' for a in all_agents]):
-                break
-
-
-    # report some stats
-    total_travel = reduce(lambda x,y: x+y, [auv.total_distance_traveled() for auv in all_auvs])
-    average_travel_duration = (total_travel/num_auvs)/auv_speed
-    average_travel_ticks = average_travel_duration/dt
-    total_travel_ticks = average_travel_ticks * num_auvs
-
-    t1 = time.time()
-    print('='*30)
-    if MISSION_TYPE == 'tri':
-        print(f'====={t}:covens:{[c.state for c in covens]}=====')
-    if MISSION_TYPE == 'lawn':
-        print(f'====={t}:agents:{[a.state for a in all_agents]}=====')
-
-    print(f'AUVs traveled for {average_travel_duration} seconds = {average_travel_ticks} ticks on average')
-    print(colored(f'TOTAL SIMULATED\n\tTICKS:{t}\n\tMINUTES:{t*dt/60.}\n\tTRAVEL:{total_travel}', 'green'))
-    print(colored(f'AVERAGE TRAVEL\n\tTICKS:{average_travel_ticks}\n\tMINUTES:{average_travel_duration/60.}\n\tTRAVEL:{total_travel/num_auvs}', 'green'))
-
-    num_buckets = 8
-    bucket_size = int(len(timings)/8)
-    s = ''
-    for bucket_idx in range(num_buckets):
-        avg = np.mean(timings[bucket_idx*bucket_size:(bucket_idx+1)*bucket_size])
-        s += str(avg)
-        s += ','
-    print(f'Avg. update timings: {s}')
-
-
-
-
-
-    ######################
-    # PLOT ALL THE THINGS
-    ######################
-    plotting = True
-
-    #  fig, (ax1, ax2) = plt.subplots(1,2)
-    try:
-        import matplotlib.pyplot as plt
-        fig, ax1 = plt.subplots(1,1)
-    except:
         try:
-            import matplotlib as mpl
-            mpl.use('Agg')
-            import matplotlib.pyplot as plt
-            fig, ax1 = plt.subplots(1,1)
+            __IPYTHON__
+            plt.ion()
+            plt.show()
         except:
-            plotting = False
-
-    plt.rcParams['pdf.fonttype'] = 42
-
-    if IPYTHON:
-        print("PLT ION")
-        plt.ion()
-
-    # to make plots look cute later
-    all_plotted_points = []
-
-    # create an image to show the coverage done
-    combined_coverage_im = np.zeros_like(all_auvs[0].marked_map._padded_map)
-
-
-    colors = ['red', 'green', 'cyan', 'purple', 'orange', 'blue']
-
-    # plot the auv paths
-    for color, idx, agent, auv in zip(colors, range(len(all_agents)), all_agents, all_auvs):
-        pgo = agent.pgo
-
-        print(f'\nAgent_id:{agent.agent_id}, index in list:{idx}')
-
-        p = os.path.join(full_exp_folder, f'{agent.agent_id}_pgo.g2o')
-        pgo.save(p)
-        print(f'Optimizing pgo with {len(pgo.vertices())} verts')
-        pgo.optimize(max_iterations=200)
-
-
-        print(f'Colored: {color}')
-        pos_trace = np.array(auv.pos_trace)
-        agent_pos_trace = np.array(agent.auv.pos_trace)
-        if plotting:
-            ax1.plot(pos_trace[:,0], pos_trace[:,1], alpha=0.5, color=color)
-            ax1.plot(agent_pos_trace[:,0], agent_pos_trace[:,1], linestyle='--', color=color, alpha=0.5)
-
-        all_plotted_points.append(pos_trace[:,:2])
-        all_plotted_points.append(agent_pos_trace[:,:2])
-
-        p = os.path.join(full_exp_folder, f'{agent.agent_id}_auv_pos_trace.npy')
-        np.save(p, pos_trace)
-        p = os.path.join(full_exp_folder, f'{agent.agent_id}_agent_pos_trace.npy')
-        np.save(p, agent_pos_trace)
-        p = os.path.join(full_exp_folder, f'{agent.agent_id}_pgo_ids.npy')
-        np.save(p, np.array(agent.odometry_pgo_vertex_ids))
-
-
-        if not summarize_pgo:
-            pgo_points = pgo.get_all_poses(agent.odometry_pgo_vertex_ids)
-            #  pgo_heading_vecs = np.array([(np.cos(p[2]), np.sin(p[2])) for p in pgo_points])
-            if plotting:
-                ax1.plot(pgo_points[:,0], pgo_points[:,1], alpha=0.7, linestyle=':', color=color)
-                #  plt.quiver(pgo_points[:,0], pgo_points[:,1],
-                           #  pgo_heading_vecs[:,0], pgo_heading_vecs[:,1],
-                           #  color=color, alpha=0.7)
-            all_plotted_points.append(pgo_points[:,:2])
-
-            # measurement lines
-            # just for one agent please
-            for edge in agent.measurement_pgo_edges:
-                if edge is None:
-                    # dafaq?
-                    continue
-                p1, p2 = edge['poses']
-                points = np.array([p1[:2], p2[:2]])
-                # dont want a line between disjoint sets of lines
-                ax1.plot(points[:,0], points[:,1], alpha=0.5, linestyle='-.', color='k', linewidth='0.2')
-
-
-
-        # paint in the coverage map
-        combined_coverage_im += auv.marked_map._padded_map
-        p = os.path.join(full_exp_folder, f'{agent.agent_id}_auv_padded_map')
-        np.save(p, auv.marked_map._padded_map)
-        p = os.path.join(full_exp_folder, f'{agent.agent_id}_agent_padded_map')
-        np.save(p, agent.auv.marked_map._padded_map)
-
-
-
-
-    if MISSION_TYPE == 'tri':
-        low = -map_xsize/2
-        high = map_xsize/2
-        lowx = low
-        lowy = low
-        highx = high
-        highy = high
-
-    if MISSION_TYPE == 'lawn':
-        lowx = -map_xsize/2
-        lowy = -map_ysize/2
-        highx = map_xsize/2
-        highy = map_ysize/2
-        plt.xlim(-swath/2, highx)
-        plt.ylim(-swath/2, highy)
-
-    if plotting:
-        # plot the coverage images
-        ax1.imshow(combined_coverage_im.T, extent=(lowx,highx,lowy,highy), origin='lower')
-
-
-
-    if plotting:
-        # make things square
-        plt.title("Trajectories and Comb. coverage")
-        ax1.set_aspect('equal', adjustable='box')
-        # plt.tight_layout()
-        # move the fig to monitor on the right
-        #  fig_manager = plt.get_current_fig_manager()
-        #  fig_manager.window.move(4000,700)
-        #  fig_manager.window.move(100,100)
-
-    # zoom into the action
-    all_plotted_points = np.vstack(all_plotted_points)
-    minx, miny = np.min(all_plotted_points, axis=0)
-    maxx, maxy = np.max(all_plotted_points, axis=0)
-    xlim_min = minx-swath
-    xlim_max = maxx+swath
-    ylim_min = miny-swath
-    ylim_max = maxy+swath
-    if plotting:
-        ax1.set_xlim(minx-swath, maxx+swath)
-        ax1.set_ylim(miny-swath, maxy+swath)
-
-    zoom_window = {'xlim_min':xlim_min,
-                   'xlim_max':xlim_max,
-                   'ylim_min':ylim_min,
-                   'ylim_max':ylim_max,
-                   'lowx':lowx,
-                   'highx':highx,
-                   'lowy':lowy,
-                   'highy':highy}
-
-
-
-
-
-
-    # plot the pose differences in a different graph
-    #  plt.title("Errors in X(r), Y(b)")
-    #  pose_diffs = np.abs(np.array(pose_diffs))
-    #  colors = ['r', 'b', 'g']
-    #  for diff in pose_diffs:
-        #  for i in range(2):
-            #  ax2.plot(range(len(diff[:,i])), diff[:,i], alpha=0.2, c=colors[i])
-    #  ax2.set_aspect('auto', adjustable='box')
-
-
-    #######################
-    # SAVE ALL THE THINGS
-    #######################
-
-    if plotting:
-        p = os.path.join(full_exp_folder, 'plot.pdf')
-        plt.savefig(p, dpi=150, bbox_inches='tight')
-
-    p = os.path.join(full_exp_folder, 'map_params.pickle')
-    pickle.dump(map_params, open(p, 'wb'))
-    p = os.path.join(full_exp_folder, 'zoom_window.pickle')
-    pickle.dump(zoom_window, open(p, 'wb'))
-
-    all_gps_points = {}
-    for agent in all_agents:
-        all_gps_points[agent.agent_id] = agent.gps_points
-    p = os.path.join(full_exp_folder, 'gps_points.pickle')
-    pickle.dump(all_gps_points, open(p, 'wb'))
-
-    p = os.path.join(full_exp_folder, 'sys_args.pickle')
-    pickle.dump(sys.argv, open(p, 'wb'))
-
-    runtime_stats = {'total_simulation_steps':total_simulation_steps}
-    runtime_stats['total_travel'] = total_travel
-    runtime_stats['total_travel_ticks'] = total_travel_ticks
-    runtime_stats['average_travel_ticks'] = average_travel_ticks
-    runtime_stats['average_travel_duration'] = average_travel_duration
-    for k,v in runtime_stats.items():
-        print(colored(f'{k}:{v}', 'blue'))
-    p = os.path.join(full_exp_folder, 'runtime_stats.pickle')
-    pickle.dump(runtime_stats, open(p, 'wb'))
-
-    shutil.copy('main.py', full_exp_folder)
-
-    if not BATCH_MODE:
-        try:
-            shutil.copy(config_file, full_exp_folder)
-        except shutil.SameFileError:
-            # this file is alredy there, no need to copy it over
             pass
 
-    print(colored(f"Saved stuff into:{full_exp_folder}", 'red'))
+        if save_plot:
+            fig.savefig(f"seed={config.seed}_comm={config.communication}.pdf", bbox_inches='tight')
 
-    # run the measurement stuff
-    # subprocess.run(['python3', 'measurements.py', full_exp_folder])
-    measure(exp_dir = full_exp_folder)
+    return results
 
-    if plotting and not BATCH_MODE:
-        plt.show()
 
+def make_config(seed, comm):
+    config = SimConfig(
+        num_auvs = 6,
+        num_hooks = 5,
+        hook_len = 100,
+        gap_between_rows = 2,
+        swath = 50,
+        beam_radius = 1,
+        target_threshold = 3,
+        comm_dist = 20,
+        dt = 0.5,
+        seed = seed,
+        std_shift = 0.4,
+        drift_mag = 0.02,
+        interact_period_ticks = 5,
+        max_ticks = 5000,
+        communication = comm
+    )
+    return config
+
+def singlify_config(config):
+    sconfig = SimConfig(
+        num_auvs = 1,
+        num_hooks = config.num_hooks,
+        hook_len = config.num_auvs * config.hook_len,
+        gap_between_rows = config.gap_between_rows,
+        swath = config.swath,
+        beam_radius = config.beam_radius,
+        target_threshold = config.target_threshold,
+        comm_dist = config.comm_dist,
+        dt = config.dt,
+        seed = config.seed,
+        std_shift = config.std_shift,
+        drift_mag = config.drift_mag,
+        interact_period_ticks = config.interact_period_ticks,
+        max_ticks = config.max_ticks,
+        communication = config.communication
+    )
+    return sconfig
+
+
+
+def run_statistical(min_seed, max_seed):
+    seeds = list(range(min_seed, max_seed))
+    comm_configs = [make_config(s,True) for s in seeds]
+    nocomm_configs = [make_config(s,False) for s in seeds]
+    single_configs = [singlify_config(c) for c in comm_configs]
+
+    # def run(config, plot=True, show_plot=False, save_plot=True):
+    comm_arg_lists = [ [config, False, False, False] for config in comm_configs ]
+    nocomm_arg_lists = [ [config, False, False, False] for config in nocomm_configs ]
+    single_arg_lists = [ [config, False, False, False] for config in single_configs ]
+
+    print("Comm runs")
+    with Pool(processes=12) as p:
+        comm_results = p.starmap(run, comm_arg_lists)
+
+    print("NO-Comm runs")
+    with Pool(processes=12) as p:
+        nocomm_results = p.starmap(run, nocomm_arg_lists)
+
+    print("Single runs")
+    with Pool(processes=12) as p:
+        single_results = p.starmap(run, single_arg_lists)
+
+    comm_percents = [r['covered_percent'] for r in comm_results]
+    nocomm_percents = [r['covered_percent'] for r in nocomm_results]
+    single_percents = [r['covered_percent'] for r in single_results]
+    plt.figure()
+    plt.violinplot([comm_percents, nocomm_percents, single_percents], showmedians=True)
+    plt.ylabel('Percent Area Covered')
+    plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
+    plt.savefig('PercentAreaCovered.pdf', dpi=150, bbox_inches='tight')
+
+    comm_errs = [r['final_distance_traveled_errs'] for r in comm_results]
+    comm_errs = [item*100 for sublist in comm_errs for item in sublist]
+    nocomm_errs = [r['final_distance_traveled_errs'] for r in nocomm_results]
+    nocomm_errs = [item*100 for sublist in nocomm_errs for item in sublist]
+    single_errs = [r['final_distance_traveled_errs'] for r in single_results]
+    single_errs = [item*100 for sublist in single_errs for item in sublist]
+    plt.figure()
+    plt.violinplot([comm_errs, nocomm_errs, single_errs], showmedians=True)
+    plt.ylabel('Final Error (% of distance traveled)')
+    plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
+    plt.savefig('DistanceTraveledError.pdf', dpi=150, bbox_inches='tight')
+
+    comm_tps = [r['true_positive_percent'] for r in comm_results]
+    nocomm_tps = [r['true_positive_percent'] for r in nocomm_results]
+    single_tps = [r['true_positive_percent'] for r in single_results]
+    plt.figure()
+    plt.violinplot([comm_tps, nocomm_tps, single_tps], showmedians=True)
+    plt.ylabel('True Positive (% of correctly estimated coverage)')
+    plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
+    plt.savefig('TruePositives.pdf', dpi=150, bbox_inches='tight')
+
+
+if __name__ == "__main__":
+    # config = make_config(seed=40, comm=True)
+    # run(config, plot=True, show_plot=True, save_plot=False)
+
+    run_statistical(40,140)
 
 
 

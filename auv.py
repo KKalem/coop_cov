@@ -183,12 +183,16 @@ class AUV(object):
             self.covering = cover
 
 
-    def coverage_polygon(self, swath, shapely=False, beam_radius=1):
+    def coverage_polygon(self, swath, pg=None, shapely=False, beam_radius=1):
         # create a vector for each side of the swath
         # stack it up for each pose in the trace
         # then rotate this vector with heading of pose trace
         # and then displace it with pose trace position
-        t = self.pose_trace
+        if pg is None:
+            t = self.pose_trace
+        else:
+            t = pg.odom_pose_trace
+
         disjoints = [[]]
         for i, covering in enumerate(self._coverage_trace):
             if covering:
