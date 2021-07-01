@@ -12,6 +12,8 @@ plt.rcParams['pdf.fonttype'] = 42
 
 from multiprocessing import Pool
 import json
+from itertools import product
+import sys
 
 import numpy as np
 from shapely.ops import unary_union
@@ -273,8 +275,22 @@ def run(config, plot=True, show_plot=False, save_plot=True):
                                       shapely = True,
                                       beam_radius = config.beam_radius)
         predicted_polies.append(polies)
-    predicted_polies = [item for sublist in predicted_polies for item in sublist]
+    flat_predicted_polies = [item for sublist in predicted_polies for item in sublist]
 
+
+    true_positive_percents = []
+    for reals, predicteds in zip(coverage_polies, predicted_polies):
+        real_poly = unary_union(reals)
+        predicted_poly = unary_union(predicteds)
+        tp_poly = real_poly & predicted_poly
+        tp_area = tp_poly.area
+        pred_area = predicted_poly.area
+        percent = 100* (tp_area / pred_area)
+        if percent > 100:
+            true_positive_percents.append(None)
+            print(f"\n\n>>>> Weird percentage, {config.__dict__}, \n{tp_area}, {pred_area} \n\n")
+        else:
+            true_positive_percents.append(percent)
 
 
     intended_coverages = []
@@ -295,14 +311,15 @@ def run(config, plot=True, show_plot=False, save_plot=True):
     # calculate some stats for the mission
     intended_coverage = unary_union(intended_coverages)
     actually_covered = unary_union(flat_coverage_polies)
-    predicted_polies = unary_union(predicted_polies)
+    predicted_coverage = unary_union(flat_predicted_polies)
     missed_area = intended_coverage - actually_covered
     unplanned_area = actually_covered - intended_coverage
     coverage_within_plan = actually_covered & intended_coverage
     planned_coverage_percent = 100* coverage_within_plan.area / intended_coverage.area
-    total_travel = sum([a.distance_traveled for a in auvs])
+    travels = [a.distance_traveled for a in auvs]
+    total_travel = sum(travels)
     # accuracy of predicted coverage?
-    true_positive_percent = 100* ((actually_covered & predicted_polies).area / predicted_polies.area)
+    true_positive_percent = 100* ((actually_covered & predicted_coverage).area / predicted_coverage.area)
     print(f"Missed = {missed_area.area} m2")
     print(f"Covered = {planned_coverage_percent}% of the planned area")
     print(f"Total travel = {total_travel} m")
@@ -315,7 +332,9 @@ def run(config, plot=True, show_plot=False, save_plot=True):
         "total_travel":total_travel,
         "covered_inside":coverage_within_plan.area,
         "final_distance_traveled_errs":errs,
-        "true_positive_percent":true_positive_percent
+        "true_positive_percent":true_positive_percent,
+        "true_positive_percents":true_positive_percents,
+        "travels":travels
     }
 
 
@@ -359,11 +378,15 @@ def run(config, plot=True, show_plot=False, save_plot=True):
     return results
 
 
-def make_config(seed, comm):
+def make_config(seed,
+                comm,
+                num_auvs = 6,
+                num_hooks = 5,
+                hook_len = 100):
     config = SimConfig(
-        num_auvs = 6,
-        num_hooks = 5,
-        hook_len = 100,
+        num_auvs = num_auvs,
+        num_hooks = num_hooks,
+        hook_len = hook_len,
         gap_between_rows = 2,
         swath = 50,
         beam_radius = 1,
@@ -399,31 +422,7 @@ def singlify_config(config):
     )
     return sconfig
 
-
-
-def run_statistical(min_seed, max_seed):
-    seeds = list(range(min_seed, max_seed))
-    comm_configs = [make_config(s,True) for s in seeds]
-    nocomm_configs = [make_config(s,False) for s in seeds]
-    single_configs = [singlify_config(c) for c in comm_configs]
-
-    # def run(config, plot=True, show_plot=False, save_plot=True):
-    comm_arg_lists = [ [config, False, False, False] for config in comm_configs ]
-    nocomm_arg_lists = [ [config, False, False, False] for config in nocomm_configs ]
-    single_arg_lists = [ [config, False, False, False] for config in single_configs ]
-
-    print("Comm runs")
-    with Pool(processes=12) as p:
-        comm_results = p.starmap(run, comm_arg_lists)
-
-    print("NO-Comm runs")
-    with Pool(processes=12) as p:
-        nocomm_results = p.starmap(run, nocomm_arg_lists)
-
-    print("Single runs")
-    with Pool(processes=12) as p:
-        single_results = p.starmap(run, single_arg_lists)
-
+def plot_violins(comm_results, nocomm_results, single_results):
     comm_percents = [r['covered_percent'] for r in comm_results]
     nocomm_percents = [r['covered_percent'] for r in nocomm_results]
     single_percents = [r['covered_percent'] for r in single_results]
@@ -455,11 +454,108 @@ def run_statistical(min_seed, max_seed):
     plt.savefig('TruePositives.pdf', dpi=150, bbox_inches='tight')
 
 
+def run_with_configs(comm_configs, nocomm_configs, single_configs):
+
+    answer = input(f"Run {len(comm_configs)} + {len(nocomm_configs)} + {len(single_configs)} sims? [y/N]:")
+    if answer != 'y':
+        sys.exit()
+
+    # def run(config, plot=True, show_plot=False, save_plot=True):
+    comm_arg_lists =   [ [config, False, False, False] for config in comm_configs ]
+    nocomm_arg_lists = [ [config, False, False, False] for config in nocomm_configs ]
+    single_arg_lists = [ [config, False, False, False] for config in single_configs ]
+
+    print("Comm runs")
+    with Pool(processes=12) as p:
+        comm_results = p.starmap(run, comm_arg_lists)
+
+    print("NO-Comm runs")
+    with Pool(processes=12) as p:
+        nocomm_results = p.starmap(run, nocomm_arg_lists)
+
+    print("Single runs")
+    with Pool(processes=12) as p:
+        single_results = p.starmap(run, single_arg_lists)
+
+    return comm_results, nocomm_results, single_results
+
+
+def run_same_distances(min_seed, max_seed):
+    seeds = list(range(min_seed, max_seed))
+    comm_configs = [make_config(s,True) for s in seeds]
+    nocomm_configs = [make_config(s,False) for s in seeds]
+    single_configs = [singlify_config(c) for c in comm_configs]
+
+    comm_results, nocomm_results, single_results = run_with_configs(comm_configs,
+                                                                    nocomm_configs,
+                                                                    single_configs)
+
+
+    plot_violins(comm_results, nocomm_results, single_results)
+
+
+def run_multiple_distances(min_seed, max_seed,
+                           min_hooks, max_hooks,
+                           min_hooklen, max_hooklen, hooklen_step):
+    seeds = list(range(min_seed, max_seed))
+    hooks = list(range(min_hooks, max_hooks))
+    hooklens = list(range(min_hooklen, max_hooklen, hooklen_step))
+    prod = list(product(seeds, hooks, hooklens))
+
+    comm_configs =   [make_config(s, True,  num_auvs=6, num_hooks=h, hook_len=l) for s,h,l in prod]
+    nocomm_configs = [make_config(s, False, num_auvs=6, num_hooks=h, hook_len=l) for s,h,l in prod]
+    single_configs = [make_config(s, False, num_auvs=1, num_hooks=h, hook_len=l) for s,h,l in prod]
+
+    comm_results, nocomm_results, single_results = run_with_configs(comm_configs,
+                                                                    nocomm_configs,
+                                                                    single_configs)
+
+
+    plot_violins(comm_results, nocomm_results, single_results)
+
+    colors = ['r', 'g', 'b']
+    shapes = ['x', 'o', '^']
+    labels = ['Comm', 'No Comm', 'Single']
+    all_results = [comm_results, nocomm_results, single_results]
+    plt.figure()
+    for results, color, shape, label in zip(all_results, colors, shapes, labels):
+        for i,res in enumerate(results):
+            travels = np.array(res['travels'])
+            tps = np.array(res['true_positive_percents'])
+            picked = tps != None
+            tps = np.array(tps[picked], dtype=float)
+            travels = np.array(travels[picked], dtype=float)
+            if i == 0:
+                plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3, label=label)
+            else:
+                plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3)
+    plt.xlabel('Travel Distance [m]')
+    plt.ylabel('True Positive (% of correctly estimated coverage)')
+    plt.ylim(top=100., bottom=0.)
+    plt.legend()
+    plt.savefig('TravelsTPs.pdf')
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
     # config = make_config(seed=40, comm=True)
     # run(config, plot=True, show_plot=True, save_plot=False)
 
-    run_statistical(40,140)
+    # run_same_distances(40,140)
+    run_multiple_distances(40,90,
+                           5,10,
+                           50,201,20)
+    # 60 run example
+    # run_multiple_distances(40,42,
+                           # 5,10,
+                           # 50,201,100)
+
+
 
 
 
