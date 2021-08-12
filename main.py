@@ -35,6 +35,7 @@ class SimConfig:
                  num_hooks,
                  hook_len,
                  gap_between_rows,
+                 overlap_between_lanes,
                  swath,
                  beam_radius,
                  target_threshold,
@@ -65,6 +66,7 @@ def construct_sim_objects(config):
                                       hook_len = config.hook_len,
                                       swath = config.swath,
                                       gap_between_rows = config.gap_between_rows,
+                                      overlap_between_lanes = config.overlap_between_lanes,
                                       double_sided=False)
 
 
@@ -382,16 +384,19 @@ def make_config(seed,
                 comm,
                 num_auvs = 6,
                 num_hooks = 5,
-                hook_len = 100):
+                hook_len = 100,
+                gap_between_rows = -5,
+                overlap_between_lanes = 3):
     config = SimConfig(
         num_auvs = num_auvs,
         num_hooks = num_hooks,
         hook_len = hook_len,
-        gap_between_rows = 2,
+        gap_between_rows = gap_between_rows,
+        overlap_between_lanes = overlap_between_lanes,
         swath = 50,
         beam_radius = 1,
         target_threshold = 3,
-        comm_dist = 20,
+        comm_dist = 50,
         dt = 0.5,
         seed = seed,
         std_shift = 0.4,
@@ -408,6 +413,7 @@ def singlify_config(config):
         num_hooks = config.num_hooks,
         hook_len = config.num_auvs * config.hook_len,
         gap_between_rows = config.gap_between_rows,
+        overlap_between_lanes = config.overlap_between_lanes,
         swath = config.swath,
         beam_radius = config.beam_radius,
         target_threshold = config.target_threshold,
@@ -430,19 +436,21 @@ def plot_violins(comm_results, nocomm_results, single_results):
     plt.violinplot([comm_percents, nocomm_percents, single_percents], showmedians=True)
     plt.ylabel('Percent Area Covered')
     plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
+    plt.ylim(top=100.)
     plt.savefig('PercentAreaCovered.pdf', dpi=150, bbox_inches='tight')
 
-    comm_errs = [r['final_distance_traveled_errs'] for r in comm_results]
-    comm_errs = [item*100 for sublist in comm_errs for item in sublist]
-    nocomm_errs = [r['final_distance_traveled_errs'] for r in nocomm_results]
-    nocomm_errs = [item*100 for sublist in nocomm_errs for item in sublist]
-    single_errs = [r['final_distance_traveled_errs'] for r in single_results]
-    single_errs = [item*100 for sublist in single_errs for item in sublist]
-    plt.figure()
-    plt.violinplot([comm_errs, nocomm_errs, single_errs], showmedians=True)
-    plt.ylabel('Final Error (% of distance traveled)')
-    plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
-    plt.savefig('DistanceTraveledError.pdf', dpi=150, bbox_inches='tight')
+    # comm_errs = [r['final_distance_traveled_errs'] for r in comm_results]
+    # comm_errs = [item*100 for sublist in comm_errs for item in sublist]
+    # nocomm_errs = [r['final_distance_traveled_errs'] for r in nocomm_results]
+    # nocomm_errs = [item*100 for sublist in nocomm_errs for item in sublist]
+    # single_errs = [r['final_distance_traveled_errs'] for r in single_results]
+    # single_errs = [item*100 for sublist in single_errs for item in sublist]
+    # plt.figure()
+    # plt.violinplot([comm_errs, nocomm_errs, single_errs], showmedians=True)
+    # plt.ylabel('Final Error (% of distance traveled)')
+    # plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
+    # plt.ylim(top=100.)
+    # plt.savefig('DistanceTraveledError.pdf', dpi=150, bbox_inches='tight')
 
     comm_tps = [r['true_positive_percent'] for r in comm_results]
     nocomm_tps = [r['true_positive_percent'] for r in nocomm_results]
@@ -451,6 +459,7 @@ def plot_violins(comm_results, nocomm_results, single_results):
     plt.violinplot([comm_tps, nocomm_tps, single_tps], showmedians=True)
     plt.ylabel('True Positive (% of correctly estimated coverage)')
     plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
+    plt.ylim(top=100.)
     plt.savefig('TruePositives.pdf', dpi=150, bbox_inches='tight')
 
 
@@ -543,13 +552,15 @@ def run_multiple_distances(min_seed, max_seed,
 
 
 if __name__ == "__main__":
-    # config = make_config(seed=40, comm=True)
-    # run(config, plot=True, show_plot=True, save_plot=False)
+    # config = make_config(seed=42, comm=True, gap_between_rows=-5, overlap_between_lanes=15)
+    config = make_config(seed=42, comm=True, num_auvs=3, num_hooks=3, overlap_between_lanes=15, gap_between_rows=-5)
+    run(config, plot=True, show_plot=True, save_plot=False)
 
     # run_same_distances(40,140)
-    run_multiple_distances(40,90,
-                           5,10,
-                           50,201,20)
+    # run_same_distances(40,80)
+    # run_multiple_distances(40,90,
+                           # 5,10,
+                           # 50,201,20)
     # 60 run example
     # run_multiple_distances(40,42,
                            # 5,10,

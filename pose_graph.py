@@ -258,7 +258,7 @@ class OdomEdge(object):
         self.pg_id = pg_id
 
     def __repr__(self):
-        return f"<E:{self.edge_id}@{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
+        return f"<OdoE:{self.edge_id}%{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
 
     @property
     def as_dict(self):
@@ -306,7 +306,7 @@ class MeasuredEdge(object):
 
 
     def __repr__(self):
-        return f"<E:{self.edge_id}@{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
+        return f"<MeaE:{self.edge_id}%{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
 
     @property
     def as_dict(self):
@@ -315,6 +315,54 @@ class MeasuredEdge(object):
                 'eid':self.edge_id,
                 'information':self.information}
         return edge
+
+
+class SummaryEdge(object):
+    def __init__(self,
+                 parent_vertex,
+                 child_vertex,
+                 edge_id,
+                 information,
+                 pg_id):
+        """
+        basically a copy of the odom edge, but separate in case i need to specialize it
+        """
+
+        self.parent_vertex = parent_vertex
+        self.child_vertex = child_vertex
+        self.edge_id = edge_id
+        self.information = information
+        # which graph do i belong to?
+        self.pg_id = pg_id
+
+    def __repr__(self):
+        return f"<SummE:{self.edge_id}%{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
+
+    @property
+    def as_dict(self):
+        edge = {'vertices':(self.parent_vertex.vid, self.child_vertex.vid),
+                'poses':(self.parent_vertex.pose, self.child_vertex.pose),
+                'eid':self.edge_id,
+                'information':self.information}
+        return edge
+
+    @property
+    def parent_vid(self):
+        return self.parent_vertex.vid
+
+    @property
+    def parent_pose(self):
+        return np.array(self.parent_vertex.pose)
+
+    @property
+    def child_vid(self):
+        return self.child_vertex.vid
+
+    @property
+    def child_pose(self):
+        return np.array(self.child_vertex.pose)
+
+
 
 
 class Vertex(object):
@@ -345,13 +393,15 @@ class Vertex(object):
 
 
     def add_child(self, child_vid, edge_id):
-        self.children_vids.append(child_vid)
-        self.connected_edge_ids[child_vid] = edge_id
+        if child_vid not in self.connected_edge_ids.keys():
+            self.children_vids.append(child_vid)
+            self.connected_edge_ids[child_vid] = edge_id
 
 
     def add_parent(self, parent_vid, edge_id):
-        self.parent_vids.append(parent_vid)
-        self.connected_edge_ids[parent_vid] = edge_id
+        if parent_vid not in self.connected_edge_ids.keys():
+            self.parent_vids.append(parent_vid)
+            self.connected_edge_ids[parent_vid] = edge_id
 
 
     def update_pose(self, pose):
@@ -369,12 +419,14 @@ class PoseGraph(object):
 
         self.root_vertex = None
 
-        # id -> Pose/Edge
+        # id -> Vertex/Edge
         self.all_vertices = {}
         self.all_edges = {}
 
         # the vertex object that is at the end of the odometry chain
         self.odom_tip_vertex = None
+        # this vertex should be the tip of the summary graph
+        self.summary_tip_vertex = None
 
         # the tips of other graphs that we interacted with
         self.other_odom_tip_vertices = {}
@@ -450,6 +502,16 @@ class PoseGraph(object):
             if edge.pg_id != self.pg_id:
                 edges.append(edge)
         return edges
+
+
+    @property
+    def self_summary_edges(self):
+        edges = []
+        for eid, edge in self.all_edges.items():
+            if type(edge) == SummaryEdge and edge.pg_id == self.pg_id:
+                edges.append(edge)
+        return edges
+
 
     @property
     def foreign_poses(self):
@@ -544,6 +606,10 @@ class PoseGraph(object):
                          information=[100.,100.,1000.],
                          pg_id=self.pg_id)
 
+        #XXX this might break a lot of things? maybe.
+        own_vert.add_child(other_vert.vid, eid)
+        other_vert.add_parent(own_vert.vid, eid)
+
         self.all_edges[eid] = e
 
 
@@ -599,6 +665,117 @@ class PoseGraph(object):
 
 
         return vertex_chain, edges, complete
+
+
+
+    def summarize_to_tip(self):
+        # from the previous summary tip to the current odom tip,
+        # create one edge that summarizes all the edges in between
+        # the agent should decide WHEN to do this, not the pose graph
+        # should the pose graph make decisions on "summarizing the summary"?
+        # probably not honestly. too much complexity for probably no return
+
+        # if we have done a summary before, start there,
+        # otherwise start from the root (which is fixed)
+        if self.summary_tip_vertex is not None:
+            chain_root_vert = self.summary_tip_vertex
+        else:
+            chain_root_vert = self.root_vertex
+
+        # early quit if the summary tip IS the odom tip
+        if chain_root_vert.vid == self.odom_tip_vertex.vid:
+            self.log("Chain root is odom tip~")
+            return
+
+        def follow_until_split(current_tip):
+            """
+            given a vertex, follow it through the chain of vertices
+            that belong to this pg and return the chain and the information matrices
+            """
+            chain = []
+            # in the meantime, collect the covariances of the edges on the chain
+            chain_informations = []
+            while True:
+                chain.append(current_tip)
+                if len(current_tip.children_vids) > 1 and len(chain) > 1:
+                    # this vert has multiple children.
+                    # MOST LIKELY it has a child going to some
+                    # other PG.
+                    # this is a split in the chain, thus
+                    # the summary must be split here too
+                    # handle the multiple children in the case that
+                    # this is the FIRST vert in the chain
+                    self.log("Tip has many children and not the first in chain")
+                    return chain, chain_informations
+                else:
+                    self.log(f"Tip has {len(current_tip.children_vids)} children, chain is {len(chain)} long")
+
+                if len(current_tip.children_vids) < 1:
+                    # no children, must be the odom tip
+                    self.log(f"Tip {current_tip} has no children")
+                    return chain, chain_informations
+
+                # by this point, we know for sure this vert has at least one child
+                # follow its child that belongs to our pg
+                children_verts = [self.all_vertices.get(vid) for vid in current_tip.children_vids]
+                own_children_verts = list(filter(lambda v: v.pg_id == self.pg_id, children_verts))
+
+                # there should really be exactly one here
+                if len(own_children_verts) != 1:
+                    self.log("Either multiple or no children in the same graph")
+                    return chain, chain_informations
+
+                child_vert = own_children_verts[0]
+
+                # get the edge between current tip and its selected child
+                edge_id = current_tip.connected_edge_ids.get(child_vert.vid)
+                edge = self.all_edges.get(edge_id)
+                chain_informations.append(edge.information)
+                # follow it~
+                current_tip = child_vert
+
+        # starting from the root, follow the children until there are multiple children
+        # and collect those disjointed parts
+        current_tip = chain_root_vert
+        while True:
+            if current_tip.vid == self.odom_tip_vertex.vid:
+                self.log("Chains reached odom tip")
+                break
+
+            chain, informations = follow_until_split(current_tip)
+
+            # given the chain, now we want a new edge from the first to last
+            # vertex in it with the info matrix 1/sum(1/inf).
+            # these informatons are just 1d arrays for a diagonal matrix, so 1/ works juuuust fine
+            inverted = [1./np.array(information) for information in informations]
+            summary_information = 1./np.sum(inverted, axis=0)
+            #XXX do i want to keep the orientation cov unchanged? kinda...
+            summary_information[2] = informations[0][2]
+
+            # create the edge and add it to the dict of all edges
+            new_edge_id = self.id_store.get_new_id()
+            edge = SummaryEdge(parent_vertex = chain[0],
+                               child_vertex = chain[-1],
+                               edge_id = new_edge_id,
+                               information = summary_information,
+                               pg_id = self.pg_id)
+            self.all_edges[new_edge_id] = edge
+            self.log(f"Added summary edge {edge}")
+
+            # update the vertices themselves that they got a new edge between them now
+            # im not SURE if this will actually update the right object but YOLO
+            chain[0].add_child(chain[-1].vid, new_edge_id)
+            chain[-1].add_parent(chain[0].vid, new_edge_id)
+
+            # and start a new chain from the last vertex
+            current_tip = chain[-1]
+
+
+
+
+
+
+
 
 
 
@@ -686,22 +863,6 @@ class PoseGraph(object):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__=='__main__':
     import matplotlib.pyplot as plt
     from mission_plan import construct_lawnmower_paths
@@ -719,16 +880,16 @@ if __name__=='__main__':
 
     dt = 0.5
     id_store = PGO_VertexIdStore()
-    comm_dist = 5
-    target_threshold = 1
+    comm_dist = 50
+    target_threshold = 3
 
 
 
     paths = construct_lawnmower_paths(num_agents = 3,
                                       num_hooks=3,
-                                      hook_len=20,
-                                      swath=10,
-                                      gap_between_rows=1,
+                                      hook_len=100,
+                                      swath=50,
+                                      gap_between_rows=-5,
                                       double_sided=False)
 
     auvs = []
@@ -747,10 +908,6 @@ if __name__=='__main__':
         auvs.append(auv)
         pgs.append(pg)
 
-    plt.axis('equal')
-    for path in paths:
-        p = np.array(path)
-        plt.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
 
 
     error = 0
@@ -798,10 +955,19 @@ if __name__=='__main__':
 
 
     for pg in pgs:
-        pg.optimize(save_before=True)
+        pg.summarize_to_tip()
+        pg.optimize(save_before=False)
 
+
+    # import sys
+    # sys.exit(0)
 
     print('Plotting')
+    plt.axis('equal')
+    for path in paths:
+        p = np.array(path)
+        plt.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
+
     for c,pg in zip(colors,pgs):
         t = pg.odom_pose_trace
         plt.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
@@ -816,12 +982,19 @@ if __name__=='__main__':
                       alpha=0.3, color=c, head_width=0.5, shape='left',
                       length_includes_head=True)
 
-        for edge in pg.self_odom_edges:
+        # for edge in pg.self_odom_edges:
+            # p1 = edge.parent_pose
+            # p2 = edge.child_pose
+            # diff = p2-p1
+            # plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                      # alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
+
+        for edge in pg.self_summary_edges:
             p1 = edge.parent_pose
             p2 = edge.child_pose
             diff = p2-p1
             plt.arrow(p1[0], p1[1], diff[0], diff[1],
-                      alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
+                      alpha=0.8, color=c, head_width=5.2, length_includes_head=True)
 
 
         pg_marker = ' '*pg.pg_id + 'f'

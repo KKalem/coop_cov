@@ -22,6 +22,7 @@ def construct_lawnmower_paths(num_agents,
                               hook_len,
                               swath,
                               gap_between_rows=0,
+                              overlap_between_lanes=0,
                               double_sided = True,
                               center_x = True,
                               center_y = True):
@@ -36,11 +37,12 @@ def construct_lawnmower_paths(num_agents,
         if flip_x:
             direction = -1
 
+        o = overlap_between_lanes /2.
         p0 = np.array((0.,0.))
         p1 = [0, side*hook_len]
-        p2 = [direction*swath, side*hook_len]
-        p3 = [direction*swath, 0]
-        p4 = [direction*2*swath, 0]
+        p2 = [direction*swath - o, side*hook_len]
+        p3 = [direction*swath - o, 0]
+        p4 = [direction*2*swath - 2*o, 0]
         return np.array([p0, p1, p2, p3, p4])
 
     def make_lawnmower_path(starting_pos, flip_y=False, flip_x=False):
