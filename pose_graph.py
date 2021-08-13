@@ -382,6 +382,7 @@ class Vertex(object):
         # that this pose points towards
         self.children_vids = []
         # edges that are shared between this pose and either a parent or a child
+        # parent/child id -> edge_id
         self.connected_edge_ids = {}
 
     def __repr__(self):
@@ -434,6 +435,10 @@ class PoseGraph(object):
         # the id of the pose that we last did an optim on
         self.last_optim_vert_id = None
 
+        # keep a record of how many vertices and edges we received through "fill_in_since_last_interaction"
+        self.received_data = {'verts':[(0.,0.)],
+                              'edges':[(0.,0.)]}
+
 
     def log(self, *args):
         if len(args) == 1:
@@ -450,14 +455,26 @@ class PoseGraph(object):
         while vertex is not None:
             poses.append(vertex.pose)
             parents = vertex.parent_vids
-            vertex = None
+            if len(parents) < 1:
+                break
+            next_vertex = None
             for parent_vid in parents:
                 # out of all the parents (there might be many)
                 # find the one that belongs to this pose graph
                 parent = self.all_vertices.get(parent_vid)
-                if parent is not None:
-                    if parent.pg_id == self.pg_id:
-                        vertex = parent
+                if parent is None:
+                    continue
+                # this parent might be connected to us with a summary edge
+                # in that case, dont use that edge because that will skip a bunch
+                # of vertices in the middle
+                eid_to_parent = vertex.connected_edge_ids.get(parent_vid)
+                edge_to_parent = self.all_edges.get(eid_to_parent)
+                if parent.pg_id == self.pg_id and type(edge_to_parent) == OdomEdge:
+                    next_vertex = parent
+
+            if next_vertex is not None:
+                vertex = next_vertex
+                next_vertex = None
 
         return np.array(poses)
 
@@ -614,7 +631,7 @@ class PoseGraph(object):
 
 
 
-    def get_chain_between_verts(self, start_vertex, end_vertex=None):
+    def get_chain_between_verts(self, start_vertex, end_vertex=None, use_summary=False):
         """
         follow the chain from start to end, return a list of vertex objects that make up the chain
         if end_vertex is None, use our odom tip
@@ -629,6 +646,8 @@ class PoseGraph(object):
         if start_vertex is None:
             return {}, {}, True
 
+        if use_summary:
+            self.summarize_to_tip()
 
         vertex_chain = {}
         complete = False
@@ -642,14 +661,33 @@ class PoseGraph(object):
                 break
 
             parents = vertex.parent_vids
-            vertex = None
+            next_vertex = None
+            jumped_with_summary = False
             for parent_vid in parents:
+                # if we already did a summary jump, skip the rest of the parents
+                if jumped_with_summary:
+                    break
                 # out of all the parents (there might be many)
                 # find the one that belongs to this pose graph
                 parent = self.all_vertices.get(parent_vid)
-                if parent is not None:
-                    if parent.pg_id == self.pg_id:
-                        vertex = parent
+                if parent is None:
+                    continue
+
+                if parent.pg_id == self.pg_id:
+                    next_vertex = parent
+                    if use_summary:
+                        # this parent might be connected to us with a summary edge
+                        # in that case, dont use the odometry edge and just jump with the summary edge
+                        eid_to_parent = vertex.connected_edge_ids.get(parent_vid)
+                        edge_to_parent = self.all_edges.get(eid_to_parent)
+                        if type(edge_to_parent) == SummaryEdge:
+                            # early stop to make sure the last "next_vertex" is the one
+                            # we got to through a summary edge
+                            jumped_with_summary = True
+
+            # if we did find a parent, keep following that
+            vertex = next_vertex
+            next_vertex = None
 
         edges = {}
         # then collect the edges that _touch_ these vertices
@@ -684,7 +722,7 @@ class PoseGraph(object):
 
         # early quit if the summary tip IS the odom tip
         if chain_root_vert.vid == self.odom_tip_vertex.vid:
-            self.log("Chain root is odom tip~")
+            # self.log("Chain root is odom tip~")
             return
 
         def follow_until_split(current_tip):
@@ -705,14 +743,14 @@ class PoseGraph(object):
                     # the summary must be split here too
                     # handle the multiple children in the case that
                     # this is the FIRST vert in the chain
-                    self.log("Tip has many children and not the first in chain")
+                    # self.log("Tip has many children and not the first in chain")
                     return chain, chain_informations
-                else:
-                    self.log(f"Tip has {len(current_tip.children_vids)} children, chain is {len(chain)} long")
+                # else:
+                    # self.log(f"Tip has {len(current_tip.children_vids)} children, chain is {len(chain)} long")
 
                 if len(current_tip.children_vids) < 1:
                     # no children, must be the odom tip
-                    self.log(f"Tip {current_tip} has no children")
+                    # self.log(f"Tip {current_tip} has no children")
                     return chain, chain_informations
 
                 # by this point, we know for sure this vert has at least one child
@@ -722,7 +760,7 @@ class PoseGraph(object):
 
                 # there should really be exactly one here
                 if len(own_children_verts) != 1:
-                    self.log("Either multiple or no children in the same graph")
+                    # self.log("Either multiple or no children in the same graph")
                     return chain, chain_informations
 
                 child_vert = own_children_verts[0]
@@ -739,7 +777,7 @@ class PoseGraph(object):
         current_tip = chain_root_vert
         while True:
             if current_tip.vid == self.odom_tip_vertex.vid:
-                self.log("Chains reached odom tip")
+                # self.log("Chains reached odom tip")
                 break
 
             chain, informations = follow_until_split(current_tip)
@@ -760,7 +798,7 @@ class PoseGraph(object):
                                information = summary_information,
                                pg_id = self.pg_id)
             self.all_edges[new_edge_id] = edge
-            self.log(f"Added summary edge {edge}")
+            # self.log(f"Added summary edge {edge}")
 
             # update the vertices themselves that they got a new edge between them now
             # im not SURE if this will actually update the right object but YOLO
@@ -771,17 +809,13 @@ class PoseGraph(object):
             current_tip = chain[-1]
 
 
+        # and finally, record our current summarized tip so we dont try
+        # to summarize from the root all the time in subsequent summarizations
+        self.summary_tip_vertex = self.odom_tip_vertex
 
 
 
-
-
-
-
-
-
-
-    def fill_in_since_last_interaction(self, other_pg):
+    def fill_in_since_last_interaction(self, other_pg, use_summary=False):
         """
         add all the verts and edges from another pg, between its current tip and
         our last known tip.
@@ -789,8 +823,16 @@ class PoseGraph(object):
         start_vert = self.other_odom_tip_vertices.get(other_pg.pg_id)
         # from the previously known latest vertex to whatever tip the other pg has
         # this is where we can measure bandwidth requirement too
+        # if use_summary:
+            # self.summarize_to_tip()
         vertices, edges, complete = other_pg.get_chain_between_verts(start_vertex = start_vert,
-                                                                     end_vertex = None)
+                                                                     end_vertex = None,
+                                                                     use_summary=use_summary)
+
+        #TODO instead use TIME?
+        tip_vid = self.odom_tip_vertex.vid
+        self.received_data['verts'].append((tip_vid, len(vertices)))
+        self.received_data['edges'].append((tip_vid, len(edges)))
 
         self.all_vertices.update(vertices)
         self.all_edges.update(edges)
@@ -799,7 +841,7 @@ class PoseGraph(object):
 
 
 
-    def make_pgo(self, start_from=None, save=False):
+    def make_pgo(self, use_summary=False, start_from=None, save=False):
 
         if start_from is None:
             start_from = -1
@@ -816,7 +858,14 @@ class PoseGraph(object):
         # add all the edges
         for eid, edge in self.all_edges.items():
             if eid >= start_from:
-                pgo.add_edge(**edge.as_dict)
+                # depending on if we want to optimize over the full graph
+                # or the summarized graph, but never BOTH
+                if use_summary and type(edge) in (SummaryEdge, MeasuredEdge):
+                    pgo.add_edge(**edge.as_dict)
+
+                if not use_summary and type(edge) in (MeasuredEdge, OdomEdge):
+                    pgo.add_edge(**edge.as_dict)
+
 
         if save:
             if self.last_optim_vert_id is None:
@@ -828,7 +877,7 @@ class PoseGraph(object):
 
 
 
-    def optimize(self, save_before=False):
+    def optimize(self, use_summary=False, save_before=False):
         # first, out of our own graph, construct a PGO
         # using vertices that go until the previous optimized tip
         # optimize the PGO
@@ -836,7 +885,11 @@ class PoseGraph(object):
         # mark our updated tip as fixed
         # remember our updated tip for next time
 
-        pgo = self.make_pgo(save=save_before, start_from=self.last_optim_vert_id)
+        if use_summary:
+            # this handles the tips being equal already
+            self.summarize_to_tip()
+
+        pgo = self.make_pgo(use_summary=use_summary, save=save_before, start_from=self.last_optim_vert_id)
 
         success = pgo.optimize(max_iterations=100)
 
@@ -955,8 +1008,8 @@ if __name__=='__main__':
 
 
     for pg in pgs:
-        pg.summarize_to_tip()
-        pg.optimize(save_before=False)
+        # pg.summarize_to_tip()
+        pg.optimize(use_summary=True, save_before=False)
 
 
     # import sys
@@ -982,12 +1035,12 @@ if __name__=='__main__':
                       alpha=0.3, color=c, head_width=0.5, shape='left',
                       length_includes_head=True)
 
-        # for edge in pg.self_odom_edges:
-            # p1 = edge.parent_pose
-            # p2 = edge.child_pose
-            # diff = p2-p1
-            # plt.arrow(p1[0], p1[1], diff[0], diff[1],
-                      # alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
+        for edge in pg.self_odom_edges:
+            p1 = edge.parent_pose
+            p2 = edge.child_pose
+            diff = p2-p1
+            plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                      alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
         for edge in pg.self_summary_edges:
             p1 = edge.parent_pose

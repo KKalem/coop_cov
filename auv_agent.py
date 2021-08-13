@@ -95,7 +95,8 @@ class Agent(object):
 
     def communicate(self,
                     all_agents,
-                    comm_dist):
+                    comm_dist,
+                    summarize_pg=False):
 
         recorded = False
 
@@ -110,7 +111,7 @@ class Agent(object):
                                            other_real_pose = agent._real_auv.pose,
                                            other_pg = agent.pg)
 
-                self.pg.fill_in_since_last_interaction(agent.pg)
+                self.pg.fill_in_since_last_interaction(agent.pg, use_summary=summarize_pg)
 
                 # was not connected, just connected
                 if not recorded:
@@ -125,7 +126,8 @@ class Agent(object):
         # if the connection status has changed, optimize the pose graph etc.
         if len(self.connection_trace) > 2:
             if self.connection_trace[-1] != self.connection_trace[-2]:
-                success = self.pg.optimize(save_before=False)
+                # success = self.pg.optimize(save_before=False)
+                success = self.pg.optimize(use_summary=summarize_pg, save_before=False)
                 if success:
                     self.internal_auv.set_pose(self.pg.odom_tip_vertex.pose)
 
@@ -138,6 +140,11 @@ class Agent(object):
         error = final_error / travel
         self.log(f"Travel: {travel}, err:{final_error}, percent:{error*100}")
         return error
+
+    def data_received(self):
+        verts_received = self.pg.received_data['verts']
+        edges_received = self.pg.received_data['edges']
+        return verts_received, edges_received
 
 
 

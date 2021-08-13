@@ -31,6 +31,7 @@ from auv_agent import Agent
 class SimConfig:
     def __init__(self,
                  communication,
+                 summarize_pg,
                  num_auvs,
                  num_hooks,
                  hook_len,
@@ -135,7 +136,8 @@ def run_sim(config, agents, consistent_drifts, paths, communication=True):
                 if t%5 == 0:
                     for agent in agents:
                         agent.communicate(agents,
-                                          config.comm_dist)
+                                          config.comm_dist,
+                                          config.summarize_pg)
 
             # check if done
             paths_done = [agent.waypoints_exhausted for agent in agents]
@@ -150,6 +152,7 @@ def run_sim(config, agents, consistent_drifts, paths, communication=True):
     print("...Done")
     errs = [a.distance_traveled_error() for a in agents]
     print(f"Distance traveled errors: {errs}")
+
     return errs, t
 
 
@@ -218,6 +221,12 @@ def plot_coverage(ax,
                 ax.arrow(p1[0], p1[1], diff[0], diff[1],
                           alpha=0.2, color=c, head_width=0.3, length_includes_head=True)
 
+            for edge in pg.self_summary_edges:
+                p1 = edge.parent_pose
+                p2 = edge.child_pose
+                diff = p2-p1
+                plt.arrow(p1[0], p1[1], diff[0], diff[1],
+                          alpha=0.1, color='k', head_width=7, length_includes_head=True)
 
             pg_marker = ' '*pg.pg_id + 'f'
             for p in pg.foreign_poses:
@@ -260,6 +269,15 @@ def run(config, plot=True, show_plot=False, save_plot=True):
                           consistent_drifts = consistent_drifts,
                           paths = paths,
                           communication = config.communication)
+
+    # collect the communication done between auvs
+    verts_received = {}
+    edges_received = {}
+    for auv, agent in zip(auvs, agents):
+        v,e = agent.data_received()
+        verts_received[auv.auv_id] = v
+        edges_received[auv.auv_id] = e
+
 
     # create the polygons for the coveages and such
     coverage_polies = []
@@ -336,7 +354,9 @@ def run(config, plot=True, show_plot=False, save_plot=True):
         "final_distance_traveled_errs":errs,
         "true_positive_percent":true_positive_percent,
         "true_positive_percents":true_positive_percents,
-        "travels":travels
+        "travels":travels,
+        "verts_received":verts_received,
+        "edges_received":edges_received
     }
 
 
@@ -382,6 +402,7 @@ def run(config, plot=True, show_plot=False, save_plot=True):
 
 def make_config(seed,
                 comm,
+                summarize_pg,
                 num_auvs = 6,
                 num_hooks = 5,
                 hook_len = 100,
@@ -403,7 +424,8 @@ def make_config(seed,
         drift_mag = 0.02,
         interact_period_ticks = 5,
         max_ticks = 5000,
-        communication = comm
+        communication = comm,
+        summarize_pg = summarize_pg
     )
     return config
 
@@ -424,7 +446,8 @@ def singlify_config(config):
         drift_mag = config.drift_mag,
         interact_period_ticks = config.interact_period_ticks,
         max_ticks = config.max_ticks,
-        communication = config.communication
+        communication = config.communication,
+        summarize_pg = config.summarize_pg
     )
     return sconfig
 
@@ -552,9 +575,27 @@ def run_multiple_distances(min_seed, max_seed,
 
 
 if __name__ == "__main__":
-    # config = make_config(seed=42, comm=True, gap_between_rows=-5, overlap_between_lanes=15)
-    config = make_config(seed=42, comm=True, num_auvs=3, num_hooks=3, overlap_between_lanes=15, gap_between_rows=-5)
-    run(config, plot=True, show_plot=True, save_plot=False)
+    config = make_config(seed=42,
+                         comm=True,
+                         summarize_pg=False,
+                         num_auvs=6,
+                         num_hooks=10,
+                         overlap_between_lanes=15,
+                         gap_between_rows=-5)
+    results = run(config, plot=True, show_plot=True, save_plot=False)
+
+    vs = results['verts_received']
+    es = results['edges_received']
+    colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
+    plt.figure()
+    for i in range(len(vs)):
+        v = np.array(vs[i])
+        plt.plot(np.cumsum(v[:,1]), c=colors[i])
+    plt.figure()
+    for i in range(len(vs)):
+        v = np.array(es[i])
+        plt.plot(np.cumsum(v[:,1]), c=colors[i])
+
 
     # run_same_distances(40,140)
     # run_same_distances(40,80)
