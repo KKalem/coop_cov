@@ -435,9 +435,6 @@ class PoseGraph(object):
         # the id of the pose that we last did an optim on
         self.last_optim_vert_id = None
 
-        # keep a record of how many vertices and edges we received through "fill_in_since_last_interaction"
-        self.received_data = {'verts':[(0.,0.)],
-                              'edges':[(0.,0.)]}
 
 
     def log(self, *args):
@@ -829,15 +826,13 @@ class PoseGraph(object):
                                                                      end_vertex = None,
                                                                      use_summary=use_summary)
 
-        #TODO instead use TIME?
-        tip_vid = self.odom_tip_vertex.vid
-        self.received_data['verts'].append((tip_vid, len(vertices)))
-        self.received_data['edges'].append((tip_vid, len(edges)))
 
         self.all_vertices.update(vertices)
         self.all_edges.update(edges)
 
         self.other_odom_tip_vertices[other_pg.pg_id] = other_pg.odom_tip_vertex
+
+        return len(vertices), len(edges)
 
 
 

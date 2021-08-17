@@ -34,7 +34,13 @@ class Agent(object):
         self.current_wp_idx = 0
         self.waypoints = waypoints
 
+        self.clock = 0
         self.connection_trace = []
+
+        # keep a record of how many vertices and edges we received through "fill_in_since_last_interaction"
+        # clock, num list
+        self.received_data = {'verts':[(0.,0.)],
+                              'edges':[(0.,0.)]}
 
     @property
     def waypoints_exhausted(self):
@@ -58,6 +64,8 @@ class Agent(object):
         # measure real auv (heading?), apply onto internal auv
         # update pose graph with internal auv
 
+
+        self.clock += dt
 
         if self.internal_auv.reached_target and not self.waypoints_exhausted:
             self.current_wp_idx += 1
@@ -111,7 +119,9 @@ class Agent(object):
                                            other_real_pose = agent._real_auv.pose,
                                            other_pg = agent.pg)
 
-                self.pg.fill_in_since_last_interaction(agent.pg, use_summary=summarize_pg)
+                num_vs, num_es = self.pg.fill_in_since_last_interaction(agent.pg, use_summary=summarize_pg)
+                self.received_data['verts'].append((self.clock, num_vs))
+                self.received_data['edges'].append((self.clock, num_es))
 
                 # was not connected, just connected
                 if not recorded:
@@ -141,10 +151,6 @@ class Agent(object):
         self.log(f"Travel: {travel}, err:{final_error}, percent:{error*100}")
         return error
 
-    def data_received(self):
-        verts_received = self.pg.received_data['verts']
-        edges_received = self.pg.received_data['edges']
-        return verts_received, edges_received
 
 
 

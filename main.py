@@ -274,9 +274,8 @@ def run(config, plot=True, show_plot=False, save_plot=True):
     verts_received = {}
     edges_received = {}
     for auv, agent in zip(auvs, agents):
-        v,e = agent.data_received()
-        verts_received[auv.auv_id] = v
-        edges_received[auv.auv_id] = e
+        verts_received[auv.auv_id] = agent.received_data['verts']
+        edges_received[auv.auv_id] = agent.received_data['edges']
 
 
     # create the polygons for the coveages and such
@@ -577,9 +576,9 @@ def run_multiple_distances(min_seed, max_seed,
 if __name__ == "__main__":
     config = make_config(seed=42,
                          comm=True,
-                         summarize_pg=False,
+                         summarize_pg=True,
                          num_auvs=6,
-                         num_hooks=10,
+                         num_hooks=5,
                          overlap_between_lanes=15,
                          gap_between_rows=-5)
     results = run(config, plot=True, show_plot=True, save_plot=False)
@@ -590,12 +589,18 @@ if __name__ == "__main__":
     plt.figure()
     for i in range(len(vs)):
         v = np.array(vs[i])
-        plt.plot(np.cumsum(v[:,1]), c=colors[i])
+        # plt.plot(np.cumsum(v[:,1]), c=colors[i])
+        plt.scatter(v[:,0], v[:,1], c=colors[i])
+    plt.ylabel('Vertices transferred')
+    plt.xlabel('Time[s]')
+
     plt.figure()
     for i in range(len(vs)):
         v = np.array(es[i])
-        plt.plot(np.cumsum(v[:,1]), c=colors[i])
-
+        # plt.plot(np.cumsum(v[:,1]), c=colors[i])
+        plt.scatter(v[:,0], v[:,1], c=colors[i])
+    plt.ylabel('Edges transferred')
+    plt.xlabel('Time[s]')
 
     # run_same_distances(40,140)
     # run_same_distances(40,80)
