@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+    #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 # vim:fenc=utf-8
 # Ozer Ozkahraman (ozero@kth.se)
@@ -359,6 +359,7 @@ def run(config, plot=True, show_plot=False, save_plot=True):
     }
 
 
+    plot_debug = True
     if plot:
         # FIGURES WOOO
         fig, axs = plt.subplots(1,2, sharex=True, sharey=True)
@@ -370,6 +371,12 @@ def run(config, plot=True, show_plot=False, save_plot=True):
         axs[1].add_artist(PolygonPatch(unplanned_area, alpha=0.5, fc='blue', ec='blue'))
         for agent, pg, auv in zip(agents, pgs, auvs):
             axs[1].plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c='black', alpha=0.5)
+
+            if plot_debug:
+                for v in pg._large_fill_verts:
+                    axs[0].scatter(v.pose[0], v.pose[1], c='k', alpha=0.7, marker='x')
+
+
 
         plot_coverage(axs[0],
                       config=config,
@@ -575,8 +582,8 @@ def run_multiple_distances(min_seed, max_seed,
 
 if __name__ == "__main__":
     config = make_config(seed=42,
-                         comm=True,
-                         summarize_pg=True,
+                         comm=False,
+                         summarize_pg=False,
                          num_auvs=6,
                          num_hooks=5,
                          overlap_between_lanes=15,

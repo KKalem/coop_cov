@@ -435,6 +435,9 @@ class PoseGraph(object):
         # the id of the pose that we last did an optim on
         self.last_optim_vert_id = None
 
+        # debugging stuff
+        self._large_fill_verts = []
+
 
 
     def log(self, *args):
@@ -469,9 +472,8 @@ class PoseGraph(object):
                 if parent.pg_id == self.pg_id and type(edge_to_parent) == OdomEdge:
                     next_vertex = parent
 
-            if next_vertex is not None:
-                vertex = next_vertex
-                next_vertex = None
+            vertex = next_vertex
+            next_vertex = None
 
         return np.array(poses)
 
@@ -605,6 +607,7 @@ class PoseGraph(object):
         own_vert = self.odom_tip_vertex
         other_vert = other_pg.odom_tip_vertex
         if own_vert is None or other_vert is None:
+            self.log("a tip was None")
             return
 
         if self.all_vertices.get(other_vert.vid) is None:
@@ -628,7 +631,7 @@ class PoseGraph(object):
 
 
 
-    def get_chain_between_verts(self, start_vertex, end_vertex=None, use_summary=False):
+    def get_chain_between_verts(self, start_vertex, end_vertex=None, use_summary=False, reason=None):
         """
         follow the chain from start to end, return a list of vertex objects that make up the chain
         if end_vertex is None, use our odom tip
@@ -641,69 +644,59 @@ class PoseGraph(object):
             start_vertex = self.root_vertex
 
         if start_vertex is None:
+            self.log("Start vertex is None")
             return {}, {}, True
 
         if use_summary:
-            self.summarize_to_tip()
+            self.summarize_to_tip(reason=reason)
+            # self.log(f"Summarized into {len(self.self_summary_edges)} summary edges")
 
         vertex_chain = {}
+        edges = {}
         complete = False
         # start from the tip and move backwards to create the chain
         vertex  = end_vertex
+        jumped_with_summary = False
         while vertex is not None:
+
             vertex_chain[vertex.vid] = vertex
 
             if vertex.vid == start_vertex.vid:
+                self.log("Reached start vertex")
                 complete = True
                 break
 
             parents = vertex.parent_vids
             next_vertex = None
-            jumped_with_summary = False
             for parent_vid in parents:
-                # if we already did a summary jump, skip the rest of the parents
-                if jumped_with_summary:
-                    break
                 # out of all the parents (there might be many)
                 # find the one that belongs to this pose graph
                 parent = self.all_vertices.get(parent_vid)
                 if parent is None:
+                    self.log("Parent is none")
                     continue
 
                 if parent.pg_id == self.pg_id:
+                    eid_to_parent = vertex.connected_edge_ids.get(parent_vid)
+                    edge_to_parent = self.all_edges.get(eid_to_parent)
                     next_vertex = parent
-                    if use_summary:
-                        # this parent might be connected to us with a summary edge
-                        # in that case, dont use the odometry edge and just jump with the summary edge
-                        eid_to_parent = vertex.connected_edge_ids.get(parent_vid)
-                        edge_to_parent = self.all_edges.get(eid_to_parent)
-                        if type(edge_to_parent) == SummaryEdge:
-                            # early stop to make sure the last "next_vertex" is the one
-                            # we got to through a summary edge
-                            jumped_with_summary = True
+                    edges[eid_to_parent] = edge_to_parent
+                    if use_summary and type(edge_to_parent) == SummaryEdge:
+                        self.log(f"Jumped with summary edge from {vertex.vid} to {parent.vid}")
+                        # early stop to make sure the last "next_vertex" is the one
+                        # we got to through a summary edge
+                        break
+
 
             # if we did find a parent, keep following that
             vertex = next_vertex
             next_vertex = None
 
-        edges = {}
-        # then collect the edges that _touch_ these vertices
-        # this might include an edge that is out of this chain
-        # but that is okay.
-        # there will be duplicates (one edge from child, one from parent for ex.)
-        # but that is also okay.
-        for vid, vertex in vertex_chain.items():
-            for vid, eid in vertex.connected_edge_ids.items():
-                edge = self.all_edges.get(eid)
-                if edge is not None:
-                    edges[eid] = edge
-
-
         return vertex_chain, edges, complete
 
 
 
-    def summarize_to_tip(self):
+    def summarize_to_tip(self, reason=None):
         # from the previous summary tip to the current odom tip,
         # create one edge that summarizes all the edges in between
         # the agent should decide WHEN to do this, not the pose graph
@@ -719,8 +712,9 @@ class PoseGraph(object):
 
         # early quit if the summary tip IS the odom tip
         if chain_root_vert.vid == self.odom_tip_vertex.vid:
-            # self.log("Chain root is odom tip~")
-            return
+            if reason is not None:
+                self.log(f"{reason}  Chain root is odom tip~")
+            return []
 
         def follow_until_split(current_tip):
             """
@@ -772,12 +766,14 @@ class PoseGraph(object):
         # starting from the root, follow the children until there are multiple children
         # and collect those disjointed parts
         current_tip = chain_root_vert
+        chains = []
         while True:
             if current_tip.vid == self.odom_tip_vertex.vid:
                 # self.log("Chains reached odom tip")
                 break
 
             chain, informations = follow_until_split(current_tip)
+            chains.append(chain)
 
             # given the chain, now we want a new edge from the first to last
             # vertex in it with the info matrix 1/sum(1/inf).
@@ -795,20 +791,75 @@ class PoseGraph(object):
                                information = summary_information,
                                pg_id = self.pg_id)
             self.all_edges[new_edge_id] = edge
-            # self.log(f"Added summary edge {edge}")
+            # if len(chain) > 10:
+                # self.log(f"Added summary edge {edge} for {len(chain)} vert chain")
 
             # update the vertices themselves that they got a new edge between them now
-            # im not SURE if this will actually update the right object but YOLO
             chain[0].add_child(chain[-1].vid, new_edge_id)
             chain[-1].add_parent(chain[0].vid, new_edge_id)
 
             # and start a new chain from the last vertex
             current_tip = chain[-1]
 
+        if reason is not None:
+            self.log(f"{reason}  {len(chains)} found")
 
         # and finally, record our current summarized tip so we dont try
         # to summarize from the root all the time in subsequent summarizations
         self.summary_tip_vertex = self.odom_tip_vertex
+
+        return chains
+
+
+    def summarize_chain(self, vertices, edges):
+        """
+        given dicts of {id:vertex} and {id:edge} of a singly linked chain, summarize them by
+        creating a single edge between the first and last vertices.
+        """
+
+        # if there are no edges, be transparent
+        if len(edges) < 2:
+            self.log(f"No need to summarize, too few edges={len(edges)}")
+            return vertices, edges
+
+        # first find the first and last vertex
+        vids = list(vertices.keys())
+        first_vert = vertices.get(min(vids))
+        last_vert = vertices.get(max(vids))
+
+        self.log(f"Summarizing between {first_vert} and {last_vert}, {len(vertices)},{len(edges)}")
+        assert first_vert is not None and last_vert is not None
+
+        # then sum up the info matrices of the edges
+        # information matrices are diagonal matrices stored as lists
+        # to sum'em, convert to covariances by 1/'ing.
+        # then sum the covs
+        # then 1/ the cov into info
+        infos = [1/np.array(edge.information) for eid,edge in edges.items()]
+        new_info = 1/np.sum(np.array(infos), axis=0)
+        #XXX keep the orientation information fixed tho, compass is constant
+        an_edge = edges.get(list(edges.keys())[0])
+        new_info[2] = an_edge.information[2]
+
+        # create the edge and add it to the dict of all edges
+        new_edge_id = self.id_store.get_new_id()
+        edge = SummaryEdge(parent_vertex = first_vert,
+                           child_vertex = last_vert,
+                           edge_id = new_edge_id,
+                           information = new_info,
+                           pg_id = self.pg_id)
+
+        # update the vertices themselves that they got a new edge between them now
+        first_vert.add_child(last_vert.vid, new_edge_id)
+        last_vert.add_parent(first_vert.vid, new_edge_id)
+
+        vert_dict = {first_vert.vid:first_vert,
+                     last_vert.vid:last_vert}
+        edge_dict = {new_edge_id:edge}
+
+        return vert_dict, edge_dict
+
+
 
 
 
@@ -820,15 +871,21 @@ class PoseGraph(object):
         start_vert = self.other_odom_tip_vertices.get(other_pg.pg_id)
         # from the previously known latest vertex to whatever tip the other pg has
         # this is where we can measure bandwidth requirement too
-        # if use_summary:
-            # self.summarize_to_tip()
+        self.log(f"Getting data from {other_pg.pg_id}")
         vertices, edges, complete = other_pg.get_chain_between_verts(start_vertex = start_vert,
                                                                      end_vertex = None,
                                                                      use_summary=use_summary)
 
+        if use_summary:
+            # here, take these verts and edges and further summarize them to be 2 verts and 1 edge in total
+            vertices, edges = self.summarize_chain(vertices, edges)
 
         self.all_vertices.update(vertices)
         self.all_edges.update(edges)
+
+        if len(vertices) > 10:
+            self._large_fill_verts.append(self.odom_tip_vertex)
+            self.log(f"{len(vertices)}, from {start_vert}, complete={complete}")
 
         self.other_odom_tip_vertices[other_pg.pg_id] = other_pg.odom_tip_vertex
 
@@ -933,7 +990,7 @@ if __name__=='__main__':
 
 
 
-    paths = construct_lawnmower_paths(num_agents = 3,
+    paths = construct_lawnmower_paths(num_agents = 2,
                                       num_hooks=3,
                                       hook_len=100,
                                       swath=50,
@@ -965,7 +1022,7 @@ if __name__=='__main__':
 
         global error
         for i in range(150):
-            error += 0.1
+            # error += 0.1
             for pg, auv in zip(pgs,auvs):
                 auv.update(dt=dt)
                 if pg.pg_id%2 == 0:
@@ -987,7 +1044,8 @@ if __name__=='__main__':
                                                   other_real_pose=auv2.pose,
                                                   other_pg=pg2)
 
-                            pg.fill_in_since_last_interaction(pg2)
+                            pg.fill_in_since_last_interaction(pg2, use_summary = True)
+                            pg.optimize(use_summary=True, save_before=False)
 
 
 
@@ -1002,16 +1060,23 @@ if __name__=='__main__':
         run(i+1)
 
 
-    for pg in pgs:
+    print("------")
+    # chains = pgs[1].summarize_to_tip()
+
+    # for pg in pgs:
         # pg.summarize_to_tip()
-        pg.optimize(use_summary=True, save_before=False)
+        # pg.optimize(use_summary=True, save_before=False)
 
 
     # import sys
     # sys.exit(0)
 
+
     print('Plotting')
     plt.axis('equal')
+
+
+
     for path in paths:
         p = np.array(path)
         plt.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
@@ -1042,7 +1107,7 @@ if __name__=='__main__':
             p2 = edge.child_pose
             diff = p2-p1
             plt.arrow(p1[0], p1[1], diff[0], diff[1],
-                      alpha=0.8, color=c, head_width=5.2, length_includes_head=True)
+                      alpha=0.3, color=c, head_width=2.2, length_includes_head=True)
 
 
         pg_marker = ' '*pg.pg_id + 'f'
@@ -1050,20 +1115,19 @@ if __name__=='__main__':
             tp = TextPath(p[:2], pg_marker, size=0.1)
             plt.gca().add_patch(PathPatch(tp, color=c))
 
-        for edge in pg.foreign_edges:
-            p1 = edge.parent_pose
-            p2 = edge.child_pose
-            p = (p2+p1)/2
-            tp = TextPath(p[:2], pg_marker, size=0.1)
-            plt.gca().add_patch(PathPatch(tp, color=c))
+        # for edge in pg.foreign_edges:
+            # p1 = edge.parent_pose
+            # p2 = edge.child_pose
+            # p = (p2+p1)/2
+            # tp = TextPath(p[:2], pg_marker, size=0.1)
+            # plt.gca().add_patch(PathPatch(tp, color=c))
 
-    for c,auv in zip(colors, auvs):
-        t = auv.pose_trace
-        plt.scatter(t[:,0], t[:,1], alpha=0.1, marker='.', c=c)
+    # for c,auv in zip(colors, auvs):
+        # t = auv.pose_trace
+        # plt.scatter(t[:,0], t[:,1], alpha=0.1, marker='.', c=c)
 
 
     print('Done plotting')
-
 
 
 
