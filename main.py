@@ -551,45 +551,33 @@ def run_multiple_distances(min_seed, max_seed,
 
     plot_violins(comm_results, nocomm_results, single_results)
 
-    colors = ['r', 'g', 'b']
-    shapes = ['x', 'o', '^']
-    labels = ['Comm', 'No Comm', 'Single']
-    all_results = [comm_results, nocomm_results, single_results]
-    plt.figure()
-    for results, color, shape, label in zip(all_results, colors, shapes, labels):
-        for i,res in enumerate(results):
-            travels = np.array(res['travels'])
-            tps = np.array(res['true_positive_percents'])
-            picked = tps != None
-            tps = np.array(tps[picked], dtype=float)
-            travels = np.array(travels[picked], dtype=float)
-            if i == 0:
-                plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3, label=label)
-            else:
-                plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3)
-    plt.xlabel('Travel Distance [m]')
-    plt.ylabel('True Positive (% of correctly estimated coverage)')
-    plt.ylim(top=100., bottom=0.)
-    plt.legend()
-    plt.savefig('TravelsTPs.pdf')
+    # this plot is entirely useless (:
+    # colors = ['r', 'g', 'b']
+    # shapes = ['x', 'o', '^']
+    # labels = ['Comm', 'No Comm', 'Single']
+    # all_results = [comm_results, nocomm_results, single_results]
+    # plt.figure()
+    # for results, color, shape, label in zip(all_results, colors, shapes, labels):
+        # for i,res in enumerate(results):
+            # travels = np.array(res['travels'])
+            # tps = np.array(res['true_positive_percents'])
+            # picked = tps != None
+            # tps = np.array(tps[picked], dtype=float)
+            # travels = np.array(travels[picked], dtype=float)
+            # if i == 0:
+                # plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3, label=label)
+            # else:
+                # plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3)
+    # plt.xlabel('Travel Distance [m]')
+    # plt.ylabel('True Positive (% of correctly estimated coverage)')
+    # plt.ylim(top=100., bottom=0.)
+    # plt.legend()
+    # plt.savefig('TravelsTPs.pdf')
 
 
 
 
-
-
-
-
-if __name__ == "__main__":
-    config = make_config(seed=42,
-                         comm=False,
-                         summarize_pg=False,
-                         num_auvs=6,
-                         num_hooks=5,
-                         overlap_between_lanes=15,
-                         gap_between_rows=-5)
-    results = run(config, plot=True, show_plot=True, save_plot=False)
-
+def plot_comms(results):
     vs = results['verts_received']
     es = results['edges_received']
     colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
@@ -608,6 +596,22 @@ if __name__ == "__main__":
         plt.scatter(v[:,0], v[:,1], c=colors[i])
     plt.ylabel('Edges transferred')
     plt.xlabel('Time[s]')
+
+
+
+
+if __name__ == "__main__":
+    config = make_config(seed=42,
+                         comm=True,
+                         summarize_pg=True,
+                         num_auvs=6,
+                         num_hooks=5,
+                         overlap_between_lanes=15,
+                         gap_between_rows=-5)
+    results = run(config, plot=True, show_plot=True, save_plot=True)
+
+    # plot_comms(results)
+
 
     # run_same_distances(40,140)
     # run_same_distances(40,80)

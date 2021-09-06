@@ -662,7 +662,7 @@ class PoseGraph(object):
             vertex_chain[vertex.vid] = vertex
 
             if vertex.vid == start_vertex.vid:
-                self.log("Reached start vertex")
+                # self.log("Reached start vertex")
                 complete = True
                 break
 
@@ -673,7 +673,7 @@ class PoseGraph(object):
                 # find the one that belongs to this pose graph
                 parent = self.all_vertices.get(parent_vid)
                 if parent is None:
-                    self.log("Parent is none")
+                    # self.log("Parent is none")
                     continue
 
                 if parent.pg_id == self.pg_id:
@@ -682,7 +682,7 @@ class PoseGraph(object):
                     next_vertex = parent
                     edges[eid_to_parent] = edge_to_parent
                     if use_summary and type(edge_to_parent) == SummaryEdge:
-                        self.log(f"Jumped with summary edge from {vertex.vid} to {parent.vid}")
+                        # self.log(f"Jumped with summary edge from {vertex.vid} to {parent.vid}")
                         # early stop to make sure the last "next_vertex" is the one
                         # we got to through a summary edge
                         break
@@ -819,7 +819,7 @@ class PoseGraph(object):
 
         # if there are no edges, be transparent
         if len(edges) < 2:
-            self.log(f"No need to summarize, too few edges={len(edges)}")
+            # self.log(f"No need to summarize, too few edges={len(edges)}")
             return vertices, edges
 
         # first find the first and last vertex
@@ -827,7 +827,7 @@ class PoseGraph(object):
         first_vert = vertices.get(min(vids))
         last_vert = vertices.get(max(vids))
 
-        self.log(f"Summarizing between {first_vert} and {last_vert}, {len(vertices)},{len(edges)}")
+        # self.log(f"Summarizing between {first_vert} and {last_vert}, {len(vertices)},{len(edges)}")
         assert first_vert is not None and last_vert is not None
 
         # then sum up the info matrices of the edges
@@ -871,7 +871,7 @@ class PoseGraph(object):
         start_vert = self.other_odom_tip_vertices.get(other_pg.pg_id)
         # from the previously known latest vertex to whatever tip the other pg has
         # this is where we can measure bandwidth requirement too
-        self.log(f"Getting data from {other_pg.pg_id}")
+        # self.log(f"Getting data from {other_pg.pg_id}")
         vertices, edges, complete = other_pg.get_chain_between_verts(start_vertex = start_vert,
                                                                      end_vertex = None,
                                                                      use_summary=use_summary)
@@ -885,7 +885,7 @@ class PoseGraph(object):
 
         if len(vertices) > 10:
             self._large_fill_verts.append(self.odom_tip_vertex)
-            self.log(f"{len(vertices)}, from {start_vert}, complete={complete}")
+            # self.log(f"{len(vertices)}, from {start_vert}, complete={complete}")
 
         self.other_odom_tip_vertices[other_pg.pg_id] = other_pg.odom_tip_vertex
 
