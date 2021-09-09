@@ -1,4 +1,4 @@
-    #! /usr/bin/env python3
+#! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 # vim:fenc=utf-8
 # Ozer Ozkahraman (ozero@kth.se)
@@ -54,7 +54,7 @@ class SimConfig:
             self.__dict__[k] = v
 
     def save_json(self, filename):
-        with open(filename) as f:
+        with open(filename, 'w') as f:
             json.dump(self.args, f)
 
 
@@ -174,34 +174,23 @@ def plot_coverage(ax,
     colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
 
     # plot the plan
-    for path in paths:
-        p = np.array(path)
-        ax.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
+    # for path in paths:
+        # p = np.array(path)
+        # ax.plot(p[:,0], p[:,1], c='k', alpha=0.2, linestyle=':')
 
     for c, polies in zip(colors, coverage_polies):
         for poly in polies:
-            ax.add_artist(PolygonPatch(poly, alpha=0.1, fc=c, ec=c))
+            ax.add_artist(PolygonPatch(poly, alpha=0.08, fc=c, ec=c))
 
     for c, agent, pg, auv in zip(colors, agents, pgs, auvs):
 
         ax.plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c=c, alpha=0.5)
         ax.plot(agent.internal_auv.pose_trace[:,0], agent.internal_auv.pose_trace[:,1],
-                c=c, alpha=0.5, linestyle='--')
+                c=c, alpha=0.5, linestyle=':')
 
-
-        # for lines instead
-        # polies = auv.coverage_polygon(config.swath, shapely=False)
-        # for poly in polies:
-            # mid = int(len(poly)/2)
-            # s1 = poly[:mid]
-            # s2 = poly[mid:]
-            # for i in range(mid):
-                # xs = [s1[i][0], s2[-i-1][0]]
-                # ys = [s1[i][1], s2[-i-1][1]]
-                # plt.plot(xs, ys, c=c, alpha=0.2)
 
         t = pg.odom_pose_trace
-        ax.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
+        # ax.scatter(t[:,0], t[:,1], alpha=0.2, marker='.', s=5, c=c)
         if plot_pg:
             for p in pg.fixed_poses:
                 ax.text(p[0], p[1], 'F', c=c)
@@ -241,10 +230,11 @@ def plot_coverage(ax,
                 ax.add_patch(PathPatch(tp, color=c))
 
 
-    for agent, d, c in zip(agents, consistent_drifts, colors):
+    for agent, path, d, c in zip(agents, paths, consistent_drifts, colors):
         _, nd = geom.vec_normalize(d)
-        nd *= config.swath
-        x,y = agent.internal_auv.pose_trace[0][:2]
+        nd *= config.swath*0.6
+        # x,y = agent.internal_auv.pose_trace[0][:2]
+        x,y = path[0,0], np.mean(path[:,1])
         x -= (1.5 * config.swath)
         ax.arrow(x, y, nd[0], nd[1],
                   color = c,
@@ -253,8 +243,21 @@ def plot_coverage(ax,
         ax.scatter(x- (1.5*config.swath) ,y, alpha=0)
 
 
+def run_try(config, plot=True, show_plot=False, save_plot=True):
+    try:
+        return run(config, plot, show_plot, save_plot)
+    except:
+        print(">>>>>>>>   RUN FAILED")
+        print("Config:")
+        print(config.__dict__)
+        print("<<<<<<<<")
+        return None
+
+
+
 def run(config, plot=True, show_plot=False, save_plot=True):
     np.random.seed(config.seed)
+    print(f"Running with config {config.__dict__}")
 
     consistent_drifts = []
     for i in range(config.num_auvs):
@@ -338,7 +341,9 @@ def run(config, plot=True, show_plot=False, save_plot=True):
     travels = [a.distance_traveled for a in auvs]
     total_travel = sum(travels)
     # accuracy of predicted coverage?
-    true_positive_percent = 100* ((actually_covered & predicted_coverage).area / predicted_coverage.area)
+    true_positive_covered = actually_covered & predicted_coverage
+    # false_positive_covered = predicted_coverage.difference(actually_covered)
+    true_positive_percent = 100* (true_positive_covered.area / predicted_coverage.area)
     print(f"Missed = {missed_area.area} m2")
     print(f"Covered = {planned_coverage_percent}% of the planned area")
     print(f"Total travel = {total_travel} m")
@@ -355,11 +360,12 @@ def run(config, plot=True, show_plot=False, save_plot=True):
         "true_positive_percents":true_positive_percents,
         "travels":travels,
         "verts_received":verts_received,
-        "edges_received":edges_received
+        "edges_received":edges_received,
+        "num_hooks":config.num_hooks,
+        "hook_len":config.hook_len
     }
 
 
-    plot_debug = True
     if plot:
         # FIGURES WOOO
         fig, axs = plt.subplots(1,2, sharex=True, sharey=True)
@@ -369,13 +375,9 @@ def run(config, plot=True, show_plot=False, save_plot=True):
         axs[1].add_artist(PolygonPatch(actually_covered, alpha=0.5, fc='green', ec='green'))
         axs[1].add_artist(PolygonPatch(missed_area, alpha=0.5, fc='red', ec='red'))
         axs[1].add_artist(PolygonPatch(unplanned_area, alpha=0.5, fc='blue', ec='blue'))
+        # axs[1].add_artist(PolygonPatch(false_positive_covered, alpha=0.5, hatch='x'))
         for agent, pg, auv in zip(agents, pgs, auvs):
             axs[1].plot(auv.pose_trace[:,0], auv.pose_trace[:,1], c='black', alpha=0.5)
-
-            if plot_debug:
-                for v in pg._large_fill_verts:
-                    axs[0].scatter(v.pose[0], v.pose[1], c='k', alpha=0.7, marker='x')
-
 
 
         plot_coverage(axs[0],
@@ -408,12 +410,16 @@ def run(config, plot=True, show_plot=False, save_plot=True):
 
 def make_config(seed,
                 comm,
-                summarize_pg,
+                summarize_pg = True,
                 num_auvs = 6,
                 num_hooks = 5,
                 hook_len = 100,
                 gap_between_rows = -5,
-                overlap_between_lanes = 3):
+                overlap_between_lanes = 3,
+                max_ticks = None):
+
+    max_ticks = num_hooks * hook_len * 50
+
     config = SimConfig(
         num_auvs = num_auvs,
         num_hooks = num_hooks,
@@ -429,7 +435,7 @@ def make_config(seed,
         std_shift = 0.4,
         drift_mag = 0.02,
         interact_period_ticks = 5,
-        max_ticks = 5000,
+        max_ticks = max_ticks,
         communication = comm,
         summarize_pg = summarize_pg
     )
@@ -457,7 +463,28 @@ def singlify_config(config):
     )
     return sconfig
 
+
 def plot_violins(comm_results, nocomm_results, single_results):
+    comm_percents = [r['covered_percent'] for r in comm_results]
+    nocomm_percents = [r['covered_percent'] for r in nocomm_results]
+    plt.figure()
+    plt.violinplot([comm_percents, nocomm_percents], showmedians=True)
+    plt.ylabel('Percent Area Covered')
+    plt.xticks(ticks=[1.0, 2.0], labels=['Cooperative', 'Non-cooperative'])
+    # plt.ylim(top=100.)
+    plt.savefig('PercentAreaCovered.pdf', dpi=150, bbox_inches='tight')
+
+    comm_tps = [r['true_positive_percent'] for r in comm_results]
+    nocomm_tps = [r['true_positive_percent'] for r in nocomm_results]
+    plt.figure()
+    plt.violinplot([comm_tps, nocomm_tps], showmedians=True)
+    plt.ylabel('True Positive Percent')
+    plt.xticks(ticks=[1.0, 2.0], labels=['Cooperative', 'Non-cooperative'])
+    # plt.ylim(top=100.)
+    plt.savefig('TruePositives.pdf', dpi=150, bbox_inches='tight')
+
+
+def plot_violins_with_singles(comm_results, nocomm_results, single_results):
     comm_percents = [r['covered_percent'] for r in comm_results]
     nocomm_percents = [r['covered_percent'] for r in nocomm_results]
     single_percents = [r['covered_percent'] for r in single_results]
@@ -486,17 +513,20 @@ def plot_violins(comm_results, nocomm_results, single_results):
     single_tps = [r['true_positive_percent'] for r in single_results]
     plt.figure()
     plt.violinplot([comm_tps, nocomm_tps, single_tps], showmedians=True)
-    plt.ylabel('True Positive (% of correctly estimated coverage)')
+    plt.ylabel('True Positive Percent')
     plt.xticks(ticks=[1.0, 2.0, 3.0], labels=['Comm', 'No Comm', 'Single'])
     plt.ylim(top=100.)
     plt.savefig('TruePositives.pdf', dpi=150, bbox_inches='tight')
 
 
-def run_with_configs(comm_configs, nocomm_configs, single_configs):
 
-    answer = input(f"Run {len(comm_configs)} + {len(nocomm_configs)} + {len(single_configs)} sims? [y/N]:")
-    if answer != 'y':
-        sys.exit()
+def run_with_configs(comm_configs, nocomm_configs, single_configs, yes=None):
+
+    if yes is None:
+        answer = input(f"Run {len(comm_configs)} + {len(nocomm_configs)} + {len(single_configs)} sims? [y/N]:")
+        if answer != 'y':
+            sys.exit()
+    print("Running~~~~")
 
     # def run(config, plot=True, show_plot=False, save_plot=True):
     comm_arg_lists =   [ [config, False, False, False] for config in comm_configs ]
@@ -529,7 +559,17 @@ def run_same_distances(min_seed, max_seed):
                                                                     single_configs)
 
 
+    with open(f'same_dist_comm_{min_seed}_{max_seed}.json', 'w') as f:
+        json.dump(comm_results, f)
+    with open(f'same_dist_nocomm_{min_seed}_{max_seed}.json', 'w') as f:
+        json.dump(nocomm_results, f)
+    with open(f'same_dist_single_{min_seed}_{max_seed}.json', 'w') as f:
+        json.dump(single_results, f)
+
     plot_violins(comm_results, nocomm_results, single_results)
+
+
+
 
 
 def run_multiple_distances(min_seed, max_seed,
@@ -538,6 +578,9 @@ def run_multiple_distances(min_seed, max_seed,
     seeds = list(range(min_seed, max_seed))
     hooks = list(range(min_hooks, max_hooks))
     hooklens = list(range(min_hooklen, max_hooklen, hooklen_step))
+    run_multiple_distances_listed(seeds, hooks, hooklens)
+
+def run_multiple_distances_listed(seeds, hooks, hooklens, yes=None):
     prod = list(product(seeds, hooks, hooklens))
 
     comm_configs =   [make_config(s, True,  num_auvs=6, num_hooks=h, hook_len=l) for s,h,l in prod]
@@ -546,82 +589,230 @@ def run_multiple_distances(min_seed, max_seed,
 
     comm_results, nocomm_results, single_results = run_with_configs(comm_configs,
                                                                     nocomm_configs,
-                                                                    single_configs)
+                                                                    single_configs,
+                                                                    yes)
 
 
-    plot_violins(comm_results, nocomm_results, single_results)
+    min_seed = min(seeds)
+    max_seed = max(seeds)
+    min_hooks = min(hooks)
+    max_hooks = max(hooks)
+    min_hooklen = min(hooklens)
+    max_hooklen = max(hooklens)
+    s = f'{min_seed}_{max_seed}_{min_hooks}_{max_hooks}_{min_hooklen}_{max_hooklen}'
+    with open(f'comm_{s}.json', 'w') as f:
+        json.dump(comm_results, f)
+    with open(f'nocomm_{s}.json', 'w') as f:
+        json.dump(nocomm_results, f)
+    with open(f'single_{s}.json', 'w') as f:
+        json.dump(single_results, f)
 
-    # this plot is entirely useless (:
-    # colors = ['r', 'g', 'b']
-    # shapes = ['x', 'o', '^']
-    # labels = ['Comm', 'No Comm', 'Single']
-    # all_results = [comm_results, nocomm_results, single_results]
-    # plt.figure()
-    # for results, color, shape, label in zip(all_results, colors, shapes, labels):
-        # for i,res in enumerate(results):
-            # travels = np.array(res['travels'])
-            # tps = np.array(res['true_positive_percents'])
-            # picked = tps != None
-            # tps = np.array(tps[picked], dtype=float)
-            # travels = np.array(travels[picked], dtype=float)
-            # if i == 0:
-                # plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3, label=label)
-            # else:
-                # plt.scatter(travels, tps, marker=shape, c=color, alpha=0.3)
-    # plt.xlabel('Travel Distance [m]')
-    # plt.ylabel('True Positive (% of correctly estimated coverage)')
-    # plt.ylim(top=100., bottom=0.)
-    # plt.legend()
-    # plt.savefig('TravelsTPs.pdf')
+
+    try:
+        plot_violins(comm_results, nocomm_results, single_results)
+    except:
+        print("No screen I'm guessing, so no violins for you")
+        pass
 
 
 
+def mean_std_min_max(a):
+    try:
+        mean = np.median(a, axis=1)
+        std = np.std(a, axis=1)
+        # minv = np.min(a, axis=1)
+        # maxv = np.max(a, axis=1)
+        minv = np.quantile(a, 0.10, axis=1)
+        maxv = np.quantile(a, 0.90, axis=1)
+    except:
+        print(f"unexpected shape: {a}")
+    return np.array((mean, std, minv, maxv))
 
-def plot_comms(results):
-    vs = results['verts_received']
-    es = results['edges_received']
-    colors = ['red', 'green', 'blue', 'purple', 'orange', 'cyan']
-    plt.figure()
-    for i in range(len(vs)):
-        v = np.array(vs[i])
-        # plt.plot(np.cumsum(v[:,1]), c=colors[i])
-        plt.scatter(v[:,0], v[:,1], c=colors[i])
-    plt.ylabel('Vertices transferred')
-    plt.xlabel('Time[s]')
 
-    plt.figure()
-    for i in range(len(vs)):
-        v = np.array(es[i])
-        # plt.plot(np.cumsum(v[:,1]), c=colors[i])
-        plt.scatter(v[:,0], v[:,1], c=colors[i])
-    plt.ylabel('Edges transferred')
-    plt.xlabel('Time[s]')
+def stats_from_json(filenames, num_hooks_filter=None, hook_len_filter=None):
+    listed = []
+    for filename in filenames:
+        print(f"Reading {filename}")
+        with open(filename, 'r') as f:
+            data = json.load(f)
 
+
+        for c in data:
+            n = c['num_hooks']
+            l = c['hook_len']
+            cp = c['covered_percent']
+            tp = c['true_positive_percent']
+            if num_hooks_filter is not None and n == num_hooks_filter:
+                listed.append((n, l, cp, tp))
+            elif hook_len_filter is not None and l == hook_len_filter:
+                listed.append((n, l, cp, tp))
+            elif num_hooks_filter is None and hook_len_filter is None:
+                listed.append((n, l, cp, tp))
+        print("Done")
+
+    assert len(listed)>0, f"No data in json! num_hooks_filter:{num_hooks_filter}, hook_len_filter:{hook_len_filter}"
+    a = np.array(listed)
+
+    stats = {'by_num_hooks':{'values':None, 'covered_percent':None, 'true_positive_percent':None},
+             'by_hook_len':{'values':None, 'covered_percent':None, 'true_positive_percent':None}}
+
+
+    by_num_hooks = a[a[:, 0].argsort()]
+    unique_hooks, indices = np.unique(by_num_hooks[:, 0], return_index=True)
+    stats['by_num_hooks']['values'] = unique_hooks
+
+    covered_percent_by_num_hooks = np.split(a[:,2], indices[1:])
+    stats['by_num_hooks']['covered_percent'] = mean_std_min_max(covered_percent_by_num_hooks)
+
+    true_positive_percent_by_num_hooks = np.split(a[:,3], indices[1:])
+    stats['by_num_hooks']['true_positive_percent'] = mean_std_min_max(true_positive_percent_by_num_hooks)
+
+
+    by_hook_len = a[a[:, 1].argsort()]
+    unqiue_lens, indices = np.unique(by_hook_len[:, 1], return_index=True)
+    stats['by_hook_len']['values'] = unqiue_lens
+
+    covered_percent_by_hook_len = np.split(a[:,2], indices[1:])
+    stats['by_hook_len']['covered_percent'] = mean_std_min_max(covered_percent_by_hook_len)
+
+    true_positive_percent_by_hook_len = np.split(a[:,3], indices[1:])
+    stats['by_hook_len']['true_positive_percent'] = mean_std_min_max(true_positive_percent_by_hook_len)
+
+    return stats
+
+
+def smooth(scalars, weight):  # Weight between 0 and 1
+    last = scalars[0]  # First value in the plot (first timestep)
+    smoothed = list()
+    for point in scalars:
+        smoothed_val = last * weight + (1 - weight) * point  # Calculate smoothed value
+        smoothed.append(smoothed_val)                        # Save it
+        last = smoothed_val                                  # Anchor the last smoothed value
+
+    return smoothed
+
+
+def plot_over_marginals(comm_files, nocomm_files, num_hooks_filter=None, hook_len_filter=None):
+
+    comm_stats = stats_from_json(comm_files, num_hooks_filter, hook_len_filter)
+    nocomm_stats = stats_from_json(nocomm_files, num_hooks_filter, hook_len_filter)
+
+
+    # x2 beacuse we wanna talk in LINES not HOOKS, each HOOK is TWO LINES
+    hooks_values = 2*np.array(comm_stats['by_num_hooks']['values'])
+    lens_values = comm_stats['by_hook_len']['values']
+
+    lines = ['solid', '--']
+    colors = ['r', 'b']
+    labels = ['Collaborative', 'Non-Collab.']
+    statss = [comm_stats, nocomm_stats]
+
+    if num_hooks_filter is not None:
+        title = f"Number of lines = {2*num_hooks_filter}"
+    elif hook_len_filter is not None:
+        title = f"Line distance = {hook_len_filter}m"
+    else:
+        title = "No filter"
+
+    for yaxis_type, ylabel in zip(['covered_percent', 'true_positive_percent'], ['Coverage[%]', 'True Positive[%]']):
+        for xs, xaxis_type, xlabel in zip([hooks_values, lens_values], ['by_num_hooks', 'by_hook_len'], ['Number of lines', 'Line distance[m]']):
+
+            if num_hooks_filter is not None and xaxis_type == 'by_num_hooks':
+                continue
+            if hook_len_filter is not None and xaxis_type == 'by_hook_len':
+                continue
+
+            fig, ax = plt.subplots(1,1)
+            fig.set_size_inches(3,3)
+            ax.set_xticks(xs)
+            ax.xaxis.set_major_locator(plt.MaxNLocator(5))
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.set_ylim(40, 95)
+            if hook_len_filter is not None:
+                ax.set_xlim(10, 100)
+            if num_hooks_filter is not None:
+                ax.set_xlim(100, 1000)
+
+            smoothing = 0.2
+            for stats, linestyle, color, label in zip(statss, lines, colors, labels):
+                ys = stats[xaxis_type][yaxis_type]
+                ax.plot(xs, smooth(ys[0], smoothing), ls=linestyle, c=color, label=label)
+                ax.fill_between(xs, smooth(ys[2], smoothing), smooth(ys[3], smoothing), color=color, alpha=0.15)
+
+            ax.legend(loc='lower left')
+            ax.set_title(title)
+
+            fig.savefig(f'{yaxis_type}_{xlabel}_{title}.pdf', dpi=150, bbox_inches='tight')
 
 
 
 if __name__ == "__main__":
-    config = make_config(seed=42,
-                         comm=True,
-                         summarize_pg=True,
-                         num_auvs=6,
-                         num_hooks=5,
-                         overlap_between_lanes=15,
-                         gap_between_rows=-5)
-    results = run(config, plot=True, show_plot=True, save_plot=True)
+    # config = make_config(seed=88,
+                         # comm=False,
+                         # summarize_pg=True,
+                         # num_auvs=6,
+                         # num_hooks=90,
+                         # hook_len=100,
+                         # overlap_between_lanes=3,
+                         # gap_between_rows=-5,
+                         # max_ticks = 20000)
+    # # config = singlify_config(config)
+    # results = run(config, plot=True, show_plot=True, save_plot=False)
 
-    # plot_comms(results)
 
 
     # run_same_distances(40,140)
-    # run_same_distances(40,80)
-    # run_multiple_distances(40,90,
-                           # 5,10,
-                           # 50,201,20)
-    # 60 run example
-    # run_multiple_distances(40,42,
-                           # 5,10,
-                           # 50,201,100)
+    # run_same_distances(40,42)
+
+    # run_multiple_distances_listed(seeds = list(range(40,90)),
+                                  # hooks = [5, 10, 15, 20, 25],
+                                  # hooklens = [50, 100, 150, 200, 250])
+
+    # run_multiple_distances_listed(seeds = list(range(40, 90)),
+                                  # hooks = [50, 60, 70, 80, 90, 100],
+                                  # hooklens = [100],
+                                  # yes = 'yes')
+
+    # for i in range(15):
+        # print("RUN DONE")
+
+    # run_multiple_distances_listed(seeds = list(range(40, 90)),
+                                  # hooks = [5],
+                                  # hooklens = [300, 400, 500, 600, 700, 800, 900, 1000],
+                                  # yes = 'yes')
+
+
+    try:
+        __IPYTHON__
+        plt.ion()
+    except:
+        pass
+
+
+    comm_files = ['small_lens_and_hooks/comm_40_89_5_25_50_250.json',
+                  'seed_40_90_extremes/comm_40_89_50_100_100_100.json',
+                  'seed_40_90_extremes/comm_40_89_5_5_300_1000.json']
+
+    nocomm_files = ['small_lens_and_hooks/nocomm_40_89_5_25_50_250.json',
+                    'seed_40_90_extremes/nocomm_40_89_50_100_100_100.json',
+                    'seed_40_90_extremes/nocomm_40_89_5_5_300_1000.json']
+
+
+
+    plot_over_marginals(comm_files, nocomm_files,
+                        num_hooks_filter=5,
+                        hook_len_filter=None)
+
+    plot_over_marginals(comm_files, nocomm_files,
+                        num_hooks_filter=None,
+                        hook_len_filter=100)
+
+
+
+
+
+
 
 
 

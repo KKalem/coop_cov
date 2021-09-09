@@ -759,6 +759,9 @@ class PoseGraph(object):
                 # get the edge between current tip and its selected child
                 edge_id = current_tip.connected_edge_ids.get(child_vert.vid)
                 edge = self.all_edges.get(edge_id)
+                if edge is None:
+                    self.log("No edge between tip and its child in this graph? dafuq")
+                    return chain, chain_informations
                 chain_informations.append(edge.information)
                 # follow it~
                 current_tip = child_vert
@@ -828,14 +831,20 @@ class PoseGraph(object):
         last_vert = vertices.get(max(vids))
 
         # self.log(f"Summarizing between {first_vert} and {last_vert}, {len(vertices)},{len(edges)}")
-        assert first_vert is not None and last_vert is not None
+        if first_vert is None or last_vert is None:
+            return vertices, edges
 
         # then sum up the info matrices of the edges
         # information matrices are diagonal matrices stored as lists
         # to sum'em, convert to covariances by 1/'ing.
         # then sum the covs
         # then 1/ the cov into info
-        infos = [1/np.array(edge.information) for eid,edge in edges.items()]
+        # infos = [1/np.array(edge.information) for eid,edge in edges.items()]
+        infos = []
+        for eid, edge in edges.items():
+            if edge is None:
+                return vertices, edges
+            infos.append(1/np.array(edge.information))
         new_info = 1/np.sum(np.array(infos), axis=0)
         #XXX keep the orientation information fixed tho, compass is constant
         an_edge = edges.get(list(edges.keys())[0])
