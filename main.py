@@ -617,16 +617,25 @@ def run_multiple_distances_listed(seeds, hooks, hooklens, yes=None):
 
 
 def mean_std_min_max(a):
-    try:
-        mean = np.median(a, axis=1)
-        std = np.std(a, axis=1)
+    means = []
+    stds = []
+    mins = []
+    maxs = []
+
+    for r in a:
+        mean = np.median(r)
+        std = np.std(r)
         # minv = np.min(a, axis=1)
         # maxv = np.max(a, axis=1)
-        minv = np.quantile(a, 0.10, axis=1)
-        maxv = np.quantile(a, 0.90, axis=1)
-    except:
-        print(f"unexpected shape: {a}")
-    return np.array((mean, std, minv, maxv))
+        minv = np.quantile(r, 0.10)
+        maxv = np.quantile(r, 0.90)
+
+        means.append(mean)
+        stds.append(std)
+        mins.append(minv)
+        maxs.append(maxv)
+
+    return np.array((means, stds, mins, maxs))
 
 
 def stats_from_json(filenames, num_hooks_filter=None, hook_len_filter=None):
@@ -692,11 +701,8 @@ def smooth(scalars, weight):  # Weight between 0 and 1
     return smoothed
 
 
-def plot_over_marginals(comm_files, nocomm_files, num_hooks_filter=None, hook_len_filter=None):
-
-    comm_stats = stats_from_json(comm_files, num_hooks_filter, hook_len_filter)
-    nocomm_stats = stats_from_json(nocomm_files, num_hooks_filter, hook_len_filter)
-
+def plot_over_marginals(comm_stats, nocomm_stats, num_hooks_filter=None, hook_len_filter=None, smoothing=0.2):
+    # get stats from stats_from_json
 
     # x2 beacuse we wanna talk in LINES not HOOKS, each HOOK is TWO LINES
     hooks_values = 2*np.array(comm_stats['by_num_hooks']['values'])
@@ -729,12 +735,11 @@ def plot_over_marginals(comm_files, nocomm_files, num_hooks_filter=None, hook_le
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabel)
             ax.set_ylim(40, 95)
-            if hook_len_filter is not None:
-                ax.set_xlim(10, 100)
-            if num_hooks_filter is not None:
-                ax.set_xlim(100, 1000)
+            # if hook_len_filter is not None:
+                # ax.set_xlim(10, 100)
+            # if num_hooks_filter is not None:
+                # ax.set_xlim(100, 1000)
 
-            smoothing = 0.2
             for stats, linestyle, color, label in zip(statss, lines, colors, labels):
                 ys = stats[xaxis_type][yaxis_type]
                 ax.plot(xs, smooth(ys[0], smoothing), ls=linestyle, c=color, label=label)
@@ -761,27 +766,22 @@ if __name__ == "__main__":
     # results = run(config, plot=True, show_plot=True, save_plot=False)
 
 
-
-    # run_same_distances(40,140)
+# run_same_distances(40,140)
     # run_same_distances(40,42)
 
     # run_multiple_distances_listed(seeds = list(range(40,90)),
                                   # hooks = [5, 10, 15, 20, 25],
                                   # hooklens = [50, 100, 150, 200, 250])
 
-    # run_multiple_distances_listed(seeds = list(range(40, 90)),
-                                  # hooks = [50, 60, 70, 80, 90, 100],
-                                  # hooklens = [100],
-                                  # yes = 'yes')
+    # for h in range(200, 401, 10):
+        # print(f"\n\n\n\nNUM HOOKS {h}\n\n\n\n")
 
-    # for i in range(15):
-        # print("RUN DONE")
+        # run_multiple_distances_listed(seeds = list(range(91, 201)),
+                                      # hooks = [h],
+                                      # hooklens = [100],
+                                      # yes = 'yes')
 
-    # run_multiple_distances_listed(seeds = list(range(40, 90)),
-                                  # hooks = [5],
-                                  # hooklens = [300, 400, 500, 600, 700, 800, 900, 1000],
-                                  # yes = 'yes')
-
+    # sys.exit(0)
 
     try:
         __IPYTHON__
@@ -790,23 +790,114 @@ if __name__ == "__main__":
         pass
 
 
-    comm_files = ['small_lens_and_hooks/comm_40_89_5_25_50_250.json',
-                  'seed_40_90_extremes/comm_40_89_50_100_100_100.json',
-                  'seed_40_90_extremes/comm_40_89_5_5_300_1000.json']
+    # # s = f'{min_seed}_{max_seed}_{min_hooks}_{max_hooks}_{min_hooklen}_{max_hooklen}'
+    comm_files = [
+        'small_lens_and_hooks/comm_40_89_5_25_50_250.json',
+        'seed_40_90_extremes/comm_40_89_50_100_100_100.json',
+        'seed_40_90_extremes/comm_40_89_5_5_300_1000.json',
+        'seed_40_90_really_extremes/comm_40_89_250_250_100_100.json',
+        'seed_40_90_really_extremes/comm_40_89_500_500_100_100.json']
 
-    nocomm_files = ['small_lens_and_hooks/nocomm_40_89_5_25_50_250.json',
-                    'seed_40_90_extremes/nocomm_40_89_50_100_100_100.json',
-                    'seed_40_90_extremes/nocomm_40_89_5_5_300_1000.json']
+    nocomm_files = [
+        'small_lens_and_hooks/nocomm_40_89_5_25_50_250.json',
+        'seed_40_90_extremes/nocomm_40_89_50_100_100_100.json',
+        'seed_40_90_extremes/nocomm_40_89_5_5_300_1000.json',
+        'seed_40_90_really_extremes/nocomm_40_89_250_250_100_100.json',
+        'seed_40_90_really_extremes/nocomm_40_89_500_500_100_100.json']
 
 
+    comm_files.extend([
+        "seed_160_180_extremes/comm_160_179_50_100_100_100.json",
+        "seed_160_180_extremes/comm_160_179_5_5_300_1000.json"])
 
-    plot_over_marginals(comm_files, nocomm_files,
-                        num_hooks_filter=5,
-                        hook_len_filter=None)
+    nocomm_files.extend([
+        "seed_160_180_extremes/nocomm_160_179_50_100_100_100.json",
+        "seed_160_180_extremes/nocomm_160_179_5_5_300_1000.json"])
 
-    plot_over_marginals(comm_files, nocomm_files,
-                        num_hooks_filter=None,
-                        hook_len_filter=100)
+    # comm_files.extend([
+     # "comm_40_89_110_110_100_100.json",
+     # "comm_40_89_120_120_100_100.json",
+     # "comm_40_89_130_130_100_100.json",
+     # "comm_40_89_140_140_100_100.json",
+     # "comm_40_89_150_150_100_100.json",
+     # "comm_40_89_60_60_100_100.json",
+     # "comm_40_89_70_70_100_100.json",
+     # "comm_40_89_80_80_100_100.json",
+     # "comm_40_89_90_90_100_100.json"])
+
+    # nocomm_files.extend([
+     # "nocomm_40_89_110_110_100_100.json",
+     # "nocomm_40_89_120_120_100_100.json",
+     # "nocomm_40_89_130_130_100_100.json",
+     # "nocomm_40_89_140_140_100_100.json",
+     # "nocomm_40_89_150_150_100_100.json",
+     # "nocomm_40_89_60_60_100_100.json",
+     # "nocomm_40_89_70_70_100_100.json",
+     # "nocomm_40_89_80_80_100_100.json",
+     # "nocomm_40_89_90_90_100_100.json"])
+
+
+    # comm_files.extend([
+        # "comm_91_200_100_100_100_100.json",
+        # "comm_91_200_110_110_100_100.json",
+        # "comm_91_200_120_120_100_100.json",
+        # "comm_91_200_130_130_100_100.json",
+        # "comm_91_200_140_140_100_100.json",
+        # "comm_91_200_150_150_100_100.json",
+        # "comm_91_200_160_160_100_100.json",
+        # "comm_91_200_170_170_100_100.json",
+        # "comm_91_200_180_180_100_100.json",
+        # "comm_91_200_190_190_100_100.json",
+        # "comm_91_200_30_30_100_100.json",
+        # "comm_91_200_40_40_100_100.json",
+        # "comm_91_200_50_50_100_100.json",
+        # "comm_91_200_60_60_100_100.json",
+        # "comm_91_200_70_70_100_100.json",
+        # "comm_91_200_80_80_100_100.json",
+        # "comm_91_200_90_90_100_100.json"])
+
+    # nocomm_files.extend([
+     # "nocomm_91_200_100_100_100_100.json",
+     # "nocomm_91_200_110_110_100_100.json",
+     # "nocomm_91_200_120_120_100_100.json",
+     # "nocomm_91_200_130_130_100_100.json",
+     # "nocomm_91_200_140_140_100_100.json",
+     # "nocomm_91_200_150_150_100_100.json",
+     # "nocomm_91_200_160_160_100_100.json",
+     # "nocomm_91_200_170_170_100_100.json",
+     # "nocomm_91_200_180_180_100_100.json",
+     # "nocomm_91_200_190_190_100_100.json",
+     # "nocomm_91_200_30_30_100_100.json",
+     # "nocomm_91_200_40_40_100_100.json",
+     # "nocomm_91_200_50_50_100_100.json",
+     # "nocomm_91_200_60_60_100_100.json",
+     # "nocomm_91_200_70_70_100_100.json",
+     # "nocomm_91_200_80_80_100_100.json",
+     # "nocomm_91_200_90_90_100_100.json"])
+
+    import glob
+    comm_files.extend(glob.glob("moar_data/comm_*.json"))
+    comm_files.extend(glob.glob("moar_data/nocomm_*.json"))
+
+
+    # # num_hooks_filter = 5
+    # # hook_len_filter = None
+    # # comm_stats = stats_from_json(comm_files, num_hooks_filter, hook_len_filter)
+    # # nocomm_stats = stats_from_json(nocomm_files, num_hooks_filter, hook_len_filter)
+    # # plot_over_marginals(comm_files, nocomm_files,
+                        # # num_hooks_filter=5,
+                        # # hook_len_filter=None,
+                        # # smoothing=0.1)
+
+    num_hooks_filter = None
+    hook_len_filter = 100
+    comm_stats = stats_from_json(comm_files, num_hooks_filter, hook_len_filter)
+    nocomm_stats = stats_from_json(nocomm_files, num_hooks_filter, hook_len_filter)
+
+    plot_over_marginals(comm_stats, nocomm_stats,
+                        num_hooks_filter=num_hooks_filter,
+                        hook_len_filter=hook_len_filter,
+                        smoothing=0.0)
 
 
 
