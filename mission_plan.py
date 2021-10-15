@@ -38,15 +38,14 @@ def construct_lawnmower_paths(num_agents,
             direction = -1
 
         o = overlap_between_lanes /2.
-        p0 = np.array((0.,0.))
         p1 = [0, side*hook_len]
         p2 = [direction*swath - o, side*hook_len]
         p3 = [direction*swath - o, 0]
         p4 = [direction*2*swath - 2*o, 0]
-        return np.array([p0, p1, p2, p3, p4])
+        return np.array([p1, p2, p3, p4])
 
     def make_lawnmower_path(starting_pos, flip_y=False, flip_x=False):
-        path = []
+        path = [starting_pos]
         for hook_i in range(num_hooks):
             if hook_i>=1:
                 starting_pos = path[-1]
@@ -105,6 +104,8 @@ def construct_lawnmower_paths(num_agents,
                 path[:,1] -= mid_y
 
 
+    # and then remove the last "exiting" bit of the path
+    paths = np.array( [path[:-1] for path in paths] )
     return paths
 
 
