@@ -125,25 +125,30 @@ class AUV(object):
                 return None, 0
 
         # if they ARE given, just execute them
-
         max_turn = np.deg2rad(self.max_turn_angle)
         steering_angle = turn_direction * min(max_turn, abs(turn_amount))
-        dist = self.forward_speed * dt
-        hdg = self.heading
 
+        # simple dubins motion model
+        beta = np.arctan2(np.tan(steering_angle), 2)
+        dx = dt * self.forward_speed * np.cos(self.heading + beta)
+        dy = dt * self.forward_speed * np.sin(self.heading + beta)
+        dh = dt * self.forward_speed * np.tan(steering_angle) * np.cos(beta) / self.auv_length
 
-        if abs(steering_angle) > 0.001: # is robot turning?
-            beta = (dist / self.auv_length) * np.tan(steering_angle)
-            r = self.auv_length / np.tan(steering_angle) # radius
+        # some weirder dubins motion model, they produce exactly the same plot tho lol
+        # dist = self.forward_speed * dt
+        # hdg = self.heading
+        # if abs(steering_angle) > 0.001: # is robot turning?
+            # beta = (dist / self.auv_length) * np.tan(steering_angle)
+            # r = self.auv_length / np.tan(steering_angle) # radius
 
-            dx = -r*np.sin(hdg) + r*np.sin(hdg + beta)
-            dy =  r*np.cos(hdg) - r*np.cos(hdg + beta)
-            dh = beta
+            # dx = -r*np.sin(hdg) + r*np.sin(hdg + beta)
+            # dy =  r*np.cos(hdg) - r*np.cos(hdg + beta)
+            # dh = beta
 
-        else: # moving in straight line
-            dx = dist*np.cos(hdg)
-            dy = dist*np.sin(hdg)
-            dh = 0.
+        # else: # moving in straight line
+            # dx = dist*np.cos(hdg)
+            # dy = dist*np.sin(hdg)
+            # dh = 0.
 
         self.pos += [dx,dy]
         self.pos += [drift_x, drift_y]
