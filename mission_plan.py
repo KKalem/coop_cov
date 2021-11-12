@@ -25,7 +25,8 @@ def construct_lawnmower_paths(num_agents,
                               overlap_between_lanes=0,
                               double_sided = True,
                               center_x = True,
-                              center_y = True):
+                              center_y = True,
+                              exiting_line = True):
     assert num_agents%2==0 or not double_sided, "There must be even number of agents for a double-sided lawnmower plan!"
 
     def make_hook(flip_y = False, flip_x = False):
@@ -105,7 +106,8 @@ def construct_lawnmower_paths(num_agents,
 
 
     # and then remove the last "exiting" bit of the path
-    paths = np.array( [path[:-1] for path in paths] )
+    if not exiting_line:
+        paths = np.array( [path[:-1] for path in paths] )
     return paths
 
 

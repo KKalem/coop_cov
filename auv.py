@@ -269,7 +269,7 @@ class AUV(object):
 if __name__ == '__main__':
     auv = AUV(auv_id=0,
               init_pos = [0,0],
-              init_heading = 30,
+              init_heading = -90,
               target_threshold = 0.5)
 
     auv.set_target([30,40])
