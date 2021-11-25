@@ -8,6 +8,8 @@ plt.rcParams['pdf.fonttype'] = 42
 import numpy as np
 import dubins
 
+import matplotlib.patches as pltpatches
+
 from toolbox import geometry as geom
 from mission_plan import MissionPlan
 from pose_graph import PoseGraph, PGO_VertexIdStore
@@ -28,16 +30,18 @@ class TimedWaypoint(object):
                  pose,
                  time,
                  line_idx,
-                 position_in_line):
+                 position_in_line,
+                 uncertainty_radius=0):
         self.pose = np.array(pose)
         self.time = time
         self.line_idx = line_idx
         assert position_in_line in [TimedWaypoint.FIRST, TimedWaypoint.MIDDLE, TimedWaypoint.LAST]
         self.position_in_line = position_in_line
+        self.uncertainty_radius = uncertainty_radius
 
 
     def __repr__(self):
-        return f"<pose {self.pose}, t={self.time}, line={self.line_idx}, pos_in_line={TimedWaypoint.pos_to_str[self.position_in_line]}>"
+        return f"<pose {self.pose}, r={self.uncertainty_radius}, t={self.time}, line={self.line_idx}, pos_in_line={TimedWaypoint.pos_to_str[self.position_in_line]}>"
 
 
     def arrow(self):
@@ -99,12 +103,31 @@ class TimedPath(object):
     def line_wps(self):
         return [wp for wp in self.wps if wp.position_in_line != TimedWaypoint.MIDDLE]
 
-    def plot_quiver(self, ax):
+    @property
+    def total_distance(self):
+        xs = self.xs
+        ys = self.ys
+        s = 0.0;
+        for i in range(len(xs) - 1):
+            s += geom.euclid_distance([xs[i], ys[i]], [xs[i+1], ys[i+1]])
+        return s
+
+
+
+    def plot_quiver(self, ax, circles=False):
         for wp in self.wps:
             if wp.position_in_line != TimedWaypoint.MIDDLE:
                 x,y,ux,uy = wp.arrow()
-                ax.quiver(x,y,ux,uy, angles='xy')
-                ax.text(x, y+2, f'{str(wp.time)[:5]}')
+                # ax.quiver(x,y,ux,uy, angles='xy')
+                ax.text(x, y+2, f't={str(wp.time)[:5]}')
+
+                if circles:
+                    ax.add_patch(pltpatches.Circle((x,y),
+                                                   radius=wp.uncertainty_radius,
+                                                   ec='blue',
+                                                   fc='blue',
+                                                   alpha=0.5))
+                    ax.text(x+5, y-5, f'r={str(wp.uncertainty_radius)[:5]}')
 
 
 
@@ -126,179 +149,206 @@ def dubins_path(pose1, pose2, turning_rad):
     return path
 
 
-
-def plan_hook(init_wp,
-              swath,
-              k,
-              turning_rad,
-              speed,
-              ideal_line_len,
-              straight_slack,
-              path=None):
-
-    if path is None:
-        path = TimedPath([])
-
-    s = ideal_line_len / (1-k)
-    c0 = swath/2. - s*k
-    c = swath - s*k
-
-    assert c>=0, f"c=={c}, Negative coverage!"
-
-    # first wp at bottom left, looking +x
-    # plan a dubins path from init_pose to the first pose of the lawnmower
-    if init_wp.line_idx == -1:
-        wp0_pose = [0., swath/2., 0.]
-        init_to_wp0_dubins = dubins_path(init_wp.pose, wp0_pose, turning_rad)
-    else:
-        wp0_pose = [0., init_wp.pose[1] + swath, 0.]
-        # in the case of this being a continuation, add in the worst case as well
-        # worst case is that the auv ends up sk away, in the direction of wp0 towards init
-        _, direction_vec = geom.vec_normalize(wp0_pose[:2] - init_wp.pose[:2])
-        worst_case_drift = -np.array(direction_vec) * (s*k)
-        worst_case_pose_at_init = [init_wp.pose[0] + worst_case_drift[0],
-                                   init_wp.pose[1] + worst_case_drift[1],
-                                   init_wp.pose[2]]
-        init_to_wp0_dubins = dubins_path(worst_case_pose_at_init, wp0_pose, turning_rad)
-
-    path_duration = init_to_wp0_dubins.path_length() / speed
-    poses, times = init_to_wp0_dubins.sample_many(1)
-    for p,t in zip(poses, times):
-        wp_dubins = TimedWaypoint(pose = p,
-                                  time = init_wp.time + t,
-                                  line_idx = init_wp.line_idx+1,
-                                  position_in_line = TimedWaypoint.MIDDLE)
-        path.append(wp_dubins)
+def worst_case_distance_pose(source_wp, away_from_this_pose):
+    """
+    return the pose that would be furthest away from _away_from_this_pose_,
+    that is uncertainty_radius away from source_wp
+    source_wp is a TimedWaypoint, away_from_this_pose is a seq of at least 2 length
+    """
+    prev_wp = source_wp
+    wp0_pose = away_from_this_pose
+    _, direction_vec = geom.vec_normalize(np.array(prev_wp.pose[:2]) - wp0_pose[:2])
+    drift_vec = np.array(direction_vec) * prev_wp.uncertainty_radius
+    worst_case_pose_at_init = [prev_wp.pose[0] + drift_vec[0],
+                               prev_wp.pose[1] + drift_vec[1],
+                               prev_wp.pose[2]]
+    return worst_case_pose_at_init
 
 
-    wp0 = TimedWaypoint(pose = wp0_pose,
-                        time = path.wps[-1].time + straight_slack,
-                        line_idx = init_wp.line_idx+1,
-                        position_in_line=TimedWaypoint.FIRST)
-    path.append(wp0)
-
-
-    wp1_pos = wp0.pose[:2] + [s, -(swath/2. - c0)]
-    wp1_pose = [wp1_pos[0], wp1_pos[1], poses_to_heading(wp0.pose[:2], wp1_pos)]
-    wp1 = TimedWaypoint(pose = wp1_pose,
-                        time = path.wps[-1].time + s/speed + straight_slack,
-                        line_idx = init_wp.line_idx+1,
-                        position_in_line=TimedWaypoint.LAST)
-    path.append(wp1)
-
-
-    wp2_pos = [ideal_line_len, wp1_pos[1]+swath]
-    wp3_pos = [wp2_pos[0]-s,  wp2_pos[1]-(swath - c)]
-
-    # needed the positions first to find the desired heading
-    wp2_pose = wp2_pos + [poses_to_heading(wp2_pos, wp3_pos)]
-    wp3_pose = wp3_pos + [wp2_pose[2]]
-
-    # now need to do dubins from wp1 to wp2
-    # to determine the reach time of wp2
-    _, direction_vec = geom.vec_normalize(np.array(wp2_pose[:2]) - wp1_pose[:2])
-    worst_case_drift = -np.array(direction_vec) * (s*k)
-    worst_case_pose_at_wp1 = [wp1_pose[0] + worst_case_drift[0],
-                              wp1_pose[1] + worst_case_drift[1],
-                              wp1_pose[2]]
-    # worst_case_pose_at_wp1 = [wp1_pose[0] - s*k, wp1_pose[1] - s*k, wp1_pose[2]]
-    wp1_to_wp2_dubins = dubins_path(worst_case_pose_at_wp1, wp2_pose, turning_rad)
-    path_duration = wp1_to_wp2_dubins.path_length() / speed
-
-    # dubins path between 1 and 2
-    poses, times = wp1_to_wp2_dubins.sample_many(1)
-    for p, t in zip(poses, times):
-        wp_dubins = TimedWaypoint(pose = p,
-                                  time = wp1.time + t,
-                                  line_idx = wp1.line_idx,
-                                  position_in_line = TimedWaypoint.MIDDLE)
-        path.append(wp_dubins)
-
-    wp2 = TimedWaypoint(pose = wp2_pose,
-                        time = wp1.time + path_duration,
-                        line_idx = path.wps[-1].line_idx+1,
-                        position_in_line=TimedWaypoint.FIRST)
-    path.append(wp2)
-
-    wp3 = TimedWaypoint(pose = wp3_pose,
-                        time = wp2.time + s/speed + straight_slack,
-                        line_idx = wp2.line_idx,
-                        position_in_line=TimedWaypoint.LAST)
-    path.append(wp3)
-
-    return path
-
-
-
-
-def plan_dubins_lawnmower(init_pose,
-                          init_time,
-                          num_lines,
-                          ideal_line_len,
-                          swath,
+def plan_dubins_lawnmower(swath,
                           k,
                           turning_rad,
                           speed,
-                          straight_slack = 0.1):
+                          rect_width,
+                          rect_height,
+                          straight_slack = 1,
+                          kept_uncertainty_ratio_after_loop = 0.0):
 
-    init_wp = TimedWaypoint(pose = init_pose,
-                            time = init_time,
-                            line_idx = -1,
-                            position_in_line = TimedWaypoint.MIDDLE)
+    # shorten that name yo
+    kural = kept_uncertainty_ratio_after_loop
 
-    path = plan_hook(init_wp,
-                     swath,
-                     k,
-                     turning_rad,
-                     speed,
-                     ideal_line_len,
-                     straight_slack,
-                     path=None)
+    def s_next(s):
+        return (1.0 + k) * s / (1.0 - k)
 
-    if num_lines <= 2:
-        return path
+    def add_in_dubins_points(prev_wp, to_pose):
+        worst_case_pose_at_prev = worst_case_distance_pose(prev_wp, to_pose)
+        prev_to_wp2_dubins = dubins_path(worst_case_pose_at_prev, to_pose, turning_rad)
 
-    for i in range(int(np.ceil((num_lines-2)/2))):
-        path = plan_hook(path.wps[-1],
-                         swath,
-                         k,
-                         turning_rad,
-                         speed,
-                         ideal_line_len,
-                         straight_slack,
-                         path=path)
+        poses, times = prev_to_wp2_dubins.sample_many(1)
+        for p,t in zip(poses, times):
+            wp_dubins = TimedWaypoint(pose = p,
+                                      time = prev_wp.time + t,
+                                      line_idx = prev_wp.line_idx+1,
+                                      position_in_line = TimedWaypoint.MIDDLE,
+                                      uncertainty_radius= prev_wp.uncertainty_radius)
+            path.append(wp_dubins)
+
+
+
+    # start from bottom left, looking at wp1
+    wp0_posi = [0., swath/2.]
+    # in petters code there is a +bk to rect_width here
+    s1 = rect_width / (1.0 - k)
+    s_old = s1
+    wp1_posi = [wp0_posi[0] + s1, wp0_posi[1] - s1*k]
+
+    wp01_heading = poses_to_heading(wp0_posi, wp1_posi)
+    wp01_dist = geom.euclid_distance(wp0_posi, wp1_posi)
+    wp01_time = wp01_dist / speed + straight_slack
+
+    wp0_pose = wp0_posi + [wp01_heading]
+    wp1_pose = wp1_posi + [wp01_heading]
+
+    wp0 = TimedWaypoint(pose = wp0_pose,
+                        time = 0,
+                        line_idx = 0,
+                        position_in_line = TimedWaypoint.FIRST,
+                        uncertainty_radius = 0)
+
+    wp1 = TimedWaypoint(pose = wp1_pose,
+                        time = wp01_time,
+                        line_idx = 0,
+                        position_in_line = TimedWaypoint.LAST,
+                        uncertainty_radius = wp01_dist * k * kural)
+
+    path = TimedPath([wp0, wp1])
+
+    # because we dont accumulate uncertainty on b
+    # for this application
+    b = swath
+
+    early_quit = False
+    for i in range(23):
+        prev_wp = path.wps[-1]
+
+        if len(path.wps) > 5:
+            ppprev_wp = path.wps[-2]
+        else:
+            ppprev_wp = wp0
+
+
+        # just above "wp1"
+        wp2_posi = [prev_wp.pose[0], prev_wp.pose[1] + b]
+
+        s_new = s_next(s_old)
+        # again, ignore +b in the paranthesis because no accumulation there
+        c_i = swath - k*(s_new + s_old)
+        if c_i <= 0:
+            early_quit = True
+            break
+
+        # above "wp0" and left of wp2
+        wp3_posi = [wp2_posi[0] - s_new, ppprev_wp.pose[1] + c_i]
+
+        wp23_heading = poses_to_heading(wp2_posi, wp3_posi)
+        wp23_dist = geom.euclid_distance(wp2_posi, wp3_posi)
+        wp23_time = wp23_dist / speed + straight_slack
+
+        wp2_pose = wp2_posi + [wp23_heading]
+        wp3_pose = wp3_posi + [wp23_heading]
+
+        # handle the dubins curve
+        add_in_dubins_points(prev_wp, wp2_pose)
+
+        wp2 = TimedWaypoint(pose = wp2_pose,
+                            time = path.wps[-1].time + straight_slack,
+                            line_idx = prev_wp.line_idx +1,
+                            position_in_line = TimedWaypoint.FIRST,
+                            uncertainty_radius = prev_wp.uncertainty_radius)
+
+        wp3 = TimedWaypoint(pose = wp3_pose,
+                            time = wp2.time + wp23_time,
+                            line_idx = wp2.line_idx,
+                            position_in_line = TimedWaypoint.LAST,
+                            uncertainty_radius = wp2.uncertainty_radius * kural + wp23_dist * k)
+
+        path.append(wp2)
+        path.append(wp3)
+
+        if rect_height < wp3.pose[1] + swath/2. - path.total_distance * k:
+            break
+
+        # just above wp3
+        wp4_posi = [wp3_posi[0], wp3_posi[1] + b]
+        s_old = s_new
+        s_new = s_next(s_old)
+        c_i = swath - k*(s_new + s_old)
+
+        # above wp2, right of wp4
+        wp5_posi = [wp4_posi[0] + s_new, wp2_posi[1] + c_i]
+
+        wp45_heading = poses_to_heading(wp4_posi, wp5_posi)
+        wp45_dist = geom.euclid_distance(wp4_posi, wp5_posi)
+        wp45_time = wp45_dist / speed + straight_slack
+
+        wp4_pose = wp4_posi + [wp45_heading]
+        wp5_pose = wp5_posi + [wp45_heading]
+
+        # handle the dubins curve
+        add_in_dubins_points(wp3, wp4_pose)
+
+        wp4 = TimedWaypoint(pose = wp4_pose,
+                            time = path.wps[-1].time + straight_slack,
+                            line_idx = wp3.line_idx + 1,
+                            position_in_line = TimedWaypoint.FIRST,
+                            uncertainty_radius = wp3.uncertainty_radius)
+
+        wp5 = TimedWaypoint(pose = wp5_pose,
+                            time = wp4.time + wp45_time,
+                            line_idx = wp4.line_idx,
+                            position_in_line = TimedWaypoint.LAST,
+                            uncertainty_radius = wp4.uncertainty_radius * kural + wp45_dist * k)
+
+        path.append(wp4)
+        path.append(wp5)
+
+        s_old = s_new
+        if rect_height < wp5.pose[1] + swath/2. - path.total_distance * k:
+            break
 
     return path
+
+
 
 
 if __name__ == "__main__":
     ideal_line_len = 200
-    num_lines = 4
+    rect_height = 500
     swath = 50
     turning_rad = 5
     speed = 1.5
-    k = 0.05
+    k = 0.02
 
-    path = plan_dubins_lawnmower(init_pose = [-10,-10,0],
-                                 init_time = 0,
-                                 num_lines = num_lines,
-                                 ideal_line_len = ideal_line_len,
-                                 swath = swath,
-                                 k = k,
-                                 turning_rad = turning_rad,
-                                 speed = speed)
+    planned_path = plan_dubins_lawnmower(swath = swath,
+                                         k = k,
+                                         turning_rad = turning_rad,
+                                         speed = speed,
+                                         rect_height = rect_height,
+                                         rect_width = ideal_line_len,
+                                         kept_uncertainty_ratio_after_loop = 0.5)
+
 
     # just get the WPs that are about the lines, let the vehicle handle the curves itself
     # without explicit wps for them.
-    remaining_wps = TimedPath(path.line_wps)
+    remaining_wps = TimedPath(planned_path.line_wps)
 
     plt.ion()
     fig, ax = plt.subplots(1,1)
     ax.axis('equal')
-    ax.plot(path.xs, path.ys)
-    path.plot_quiver(ax)
+    ax.plot(planned_path.xs, planned_path.ys)
+    planned_path.plot_quiver(ax, circles=True)
     ax.plot([0, ideal_line_len, ideal_line_len,     0,                  0],
-            [0, 0,              swath*num_lines,    swath*num_lines,    0], c='k')
+            [0, 0,              rect_height,        rect_height,        0], c='k')
 
 
 
@@ -321,8 +371,8 @@ if __name__ == "__main__":
     pg = pgs[0]
     agent = agents[0]
 
-    auv.set_pose([0,0,1.57])
-    current_time = 0
+    auv.set_pose(planned_path.wps[0].pose)
+    current_time = -1
     selected_wps = []
 
     seconds_per_segment = 0.5
@@ -371,7 +421,7 @@ if __name__ == "__main__":
                 break
 
 
-        if best_path is None or best_wp is None:
+        if best_path is None or best_wp is None or best_path.shape == (0,):
             break
         plt.plot(best_path[:,0], best_path[:,1], c='r', alpha=0.8, linestyle='--')
 
@@ -388,7 +438,7 @@ if __name__ == "__main__":
                 #make sure the prev wp is a 'first'
                 if prev_wp.position_in_line == TimedWaypoint.FIRST:
                     dist = geom.euclid_distance(prev_wp.pose[:2], best_wp.pose[:2])
-                    drift_mag = k*dist
+                    drift_mag = prev_wp.uncertainty_radius + k*dist
                     print(f"Drift mag set to {drift_mag}")
 
                 next_pose = remaining_wps.wps[possible_wp_idx+1].pose
