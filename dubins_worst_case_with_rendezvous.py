@@ -31,13 +31,17 @@ class TimedWaypoint(object):
                  time,
                  line_idx,
                  position_in_line,
-                 uncertainty_radius=0):
+                 uncertainty_radius=0,
+                 idx_in_pattern=None,
+                 uncertainty_radius_before_loop_closure=0):
         self.pose = np.array(pose)
         self.time = time
         self.line_idx = line_idx
         assert position_in_line in [TimedWaypoint.FIRST, TimedWaypoint.MIDDLE, TimedWaypoint.LAST]
         self.position_in_line = position_in_line
         self.uncertainty_radius = uncertainty_radius
+        self.uncertainty_radius_before_loop_closure = uncertainty_radius_before_loop_closure
+        self.idx_in_pattern = idx_in_pattern
 
 
     def __repr__(self):
@@ -118,8 +122,7 @@ class TimedPath(object):
         for wp in self.wps:
             if wp.position_in_line != TimedWaypoint.MIDDLE:
                 x,y,ux,uy = wp.arrow()
-                # ax.quiver(x,y,ux,uy, angles='xy')
-                ax.text(x, y+2, f't={str(wp.time)[:5]}')
+                ax.text(x, y-2, f'[{wp.idx_in_pattern}]t={str(wp.time)[:4]}')
 
                 if circles:
                     ax.add_patch(pltpatches.Circle((x,y),
@@ -127,7 +130,13 @@ class TimedPath(object):
                                                    ec='blue',
                                                    fc='blue',
                                                    alpha=0.5))
-                    ax.text(x+5, y-5, f'r={str(wp.uncertainty_radius)[:5]}')
+                    # ax.text(x+5, y-5, f'r={str(wp.uncertainty_radius)[:5]}')
+                    if wp.uncertainty_radius_before_loop_closure is not None:
+                        ax.add_patch(pltpatches.Circle((x,y),
+                                                       radius=wp.uncertainty_radius_before_loop_closure,
+                                                       ec='blue',
+                                                       fc='blue',
+                                                       alpha=0.2))
 
 
 
@@ -178,7 +187,8 @@ def plan_dubins_lawnmower(swath,
     kural = kept_uncertainty_ratio_after_loop
 
     def s_next(s):
-        return (1.0 + k) * s / (1.0 - k)
+        s = (1.0 + k) * s / (1.0 - k)
+        return  s
 
     def add_in_dubins_points(prev_wp, to_pose):
         worst_case_pose_at_prev = worst_case_distance_pose(prev_wp, to_pose)
@@ -213,13 +223,16 @@ def plan_dubins_lawnmower(swath,
                         time = 0,
                         line_idx = 0,
                         position_in_line = TimedWaypoint.FIRST,
-                        uncertainty_radius = 0)
+                        uncertainty_radius = 0,
+                        idx_in_pattern=0)
 
     wp1 = TimedWaypoint(pose = wp1_pose,
                         time = wp01_time,
                         line_idx = 0,
                         position_in_line = TimedWaypoint.LAST,
-                        uncertainty_radius = wp01_dist * k * kural)
+                        uncertainty_radius = wp01_dist * k * kural,
+                        uncertainty_radius_before_loop_closure = wp01_dist*k,
+                        idx_in_pattern=1)
 
     path = TimedPath([wp0, wp1])
 
@@ -239,6 +252,9 @@ def plan_dubins_lawnmower(swath,
 
         # just above "wp1"
         wp2_posi = [prev_wp.pose[0], prev_wp.pose[1] + b]
+        # but make it touch the rect as much as you can
+        # instead of going straight up
+        wp2_posi[0] = rect_width + prev_wp.uncertainty_radius
 
         s_new = s_next(s_old)
         # again, ignore +b in the paranthesis because no accumulation there
@@ -264,22 +280,30 @@ def plan_dubins_lawnmower(swath,
                             time = path.wps[-1].time + straight_slack,
                             line_idx = prev_wp.line_idx +1,
                             position_in_line = TimedWaypoint.FIRST,
-                            uncertainty_radius = prev_wp.uncertainty_radius)
+                            uncertainty_radius = prev_wp.uncertainty_radius,
+                            idx_in_pattern=2)
 
         wp3 = TimedWaypoint(pose = wp3_pose,
                             time = wp2.time + wp23_time,
                             line_idx = wp2.line_idx,
                             position_in_line = TimedWaypoint.LAST,
-                            uncertainty_radius = wp2.uncertainty_radius * kural + wp23_dist * k)
+                            uncertainty_radius = wp2.uncertainty_radius * kural + wp23_dist * k,
+                            uncertainty_radius_before_loop_closure = wp2.uncertainty_radius + wp23_dist*k,
+                            idx_in_pattern=3)
+        wp3.pose[0] = -wp3.uncertainty_radius_before_loop_closure
 
         path.append(wp2)
         path.append(wp3)
 
-        if rect_height < wp3.pose[1] + swath/2. - path.total_distance * k:
+        if rect_height < wp3.pose[1] - swath/2. - wp3.uncertainty_radius_before_loop_closure:
+            print('wp3 break')
             break
+
 
         # just above wp3
         wp4_posi = [wp3_posi[0], wp3_posi[1] + b]
+        wp4_posi[0] = -wp3.uncertainty_radius
+
         s_old = s_new
         s_new = s_next(s_old)
         c_i = swath - k*(s_new + s_old)
@@ -301,19 +325,23 @@ def plan_dubins_lawnmower(swath,
                             time = path.wps[-1].time + straight_slack,
                             line_idx = wp3.line_idx + 1,
                             position_in_line = TimedWaypoint.FIRST,
-                            uncertainty_radius = wp3.uncertainty_radius)
+                            uncertainty_radius = wp3.uncertainty_radius,
+                            idx_in_pattern=4)
 
         wp5 = TimedWaypoint(pose = wp5_pose,
                             time = wp4.time + wp45_time,
                             line_idx = wp4.line_idx,
                             position_in_line = TimedWaypoint.LAST,
-                            uncertainty_radius = wp4.uncertainty_radius * kural + wp45_dist * k)
+                            uncertainty_radius = wp4.uncertainty_radius * kural + wp45_dist * k,
+                            uncertainty_radius_before_loop_closure = wp4.uncertainty_radius + wp45_dist * k,
+                            idx_in_pattern=5)
+        wp5.pose[0] = rect_width + wp5.uncertainty_radius_before_loop_closure
 
         path.append(wp4)
         path.append(wp5)
 
         s_old = s_new
-        if rect_height < wp5.pose[1] + swath/2. - path.total_distance * k:
+        if rect_height < wp5.pose[1] - swath/2. - wp5.uncertainty_radius_before_loop_closure:
             break
 
     return path
@@ -322,12 +350,13 @@ def plan_dubins_lawnmower(swath,
 
 
 if __name__ == "__main__":
-    ideal_line_len = 200
-    rect_height = 500
+    ideal_line_len = 1000
+    rect_height = 1000
     swath = 50
     turning_rad = 5
     speed = 1.5
-    k = 0.02
+    k = 0.01
+    kural = 0.7
 
     planned_path = plan_dubins_lawnmower(swath = swath,
                                          k = k,
@@ -335,7 +364,7 @@ if __name__ == "__main__":
                                          speed = speed,
                                          rect_height = rect_height,
                                          rect_width = ideal_line_len,
-                                         kept_uncertainty_ratio_after_loop = 0.5)
+                                         kept_uncertainty_ratio_after_loop = kural)
 
 
     # just get the WPs that are about the lines, let the vehicle handle the curves itself
