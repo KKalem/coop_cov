@@ -120,6 +120,25 @@ class DriftModel:
         return uxs, uys
 
 
+    def visualize(self, ax, meters_between_arrows):
+        x_count = int(self.area_xsize / meters_between_arrows)
+        y_count = int(self.area_ysize / meters_between_arrows)
+
+        x_axis = np.linspace(0, self.area_xsize, x_count)
+        y_axis = np.linspace(0, self.area_ysize, y_count)
+        xs, ys = np.meshgrid(x_axis, y_axis)
+
+        uxs, uys = self.sample(xs, ys)
+
+        colors = np.arctan2(uys, uxs)
+        ax.quiver(xs, ys, uxs, uys, colors, cmap='hsv')
+        ax.scatter(self.xcenters, self.ycenters, c='k')
+        for x,y, xsc, ysc in zip(self.xcenters, self.ycenters, self.xscales, self.yscales):
+            e = patches.Ellipse((x,y), xsc*10, ysc*10, fill=True, alpha=0.2, color='b')
+            ax.add_patch(e)
+
+
+
 
 
 
@@ -151,21 +170,9 @@ if __name__ == '__main__':
                              area_ysize = 1000,
                              scale_size = 100)
 
+    drift_model.visualize(ax, meters_between_arrows = 20)
 
-    count = 30
 
-    x_axis = np.linspace(0,drift_model.area_xsize,count)
-    y_axis = np.linspace(0,drift_model.area_ysize,count)
-    xs, ys = np.meshgrid(x_axis, y_axis)
-
-    uxs, uys = drift_model.sample(xs, ys)
-
-    colors = np.arctan2(uys, uxs)
-    ax.quiver(xs, ys, uxs, uys, colors, cmap='hsv')
-    ax.scatter(drift_model.xcenters, drift_model.ycenters, c='k')
-    for x,y, xsc, ysc in zip(drift_model.xcenters, drift_model.ycenters, drift_model.xscales, drift_model.yscales):
-        e = patches.Ellipse((x,y), xsc*10, ysc*10, fill=True, alpha=0.2, color='b')
-        ax.add_patch(e)
 
 
 
