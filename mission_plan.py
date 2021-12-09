@@ -110,15 +110,42 @@ class TimedPath(object):
         return s
 
 
+    def mirror_around_x(self):
+        middle = np.average(self.ys)
+        for wp in self.wps:
+            x,y,h = wp.pose
+            new_y = (-(y - middle))+middle
+            h_vec_x = np.cos(h)
+            h_vec_y = np.sin(h)
+            new_h = np.arctan2(-h_vec_y, h_vec_x)
+            wp.pose = np.array([x, new_y, new_h])
+
+    def mirror_around_y(self):
+        middle = np.average(self.xs)
+        for wp in self.wps:
+            x,y,h = wp.pose
+            new_x = (-(x - middle))+middle
+            h_vec_x = np.cos(h)
+            h_vec_y = np.sin(h)
+            new_h = np.arctan2(h_vec_y, -h_vec_x)
+            wp.pose = np.array([new_x, y, new_h])
+
+
+    def transpose(self, dx, dy):
+        for wp in self.wps:
+            wp.pose[0] += dx
+            wp.pose[1] += dy
+
+
 
     def plot_quiver(self, ax, circles=False):
         for wp in self.wps:
             if wp.position_in_line != TimedWaypoint.MIDDLE:
                 x,y,ux,uy = wp.arrow()
                 if wp.idx_in_pattern is not None:
-                    ax.text(x, y-2, f'[{wp.idx_in_pattern}]t={str(wp.time)[:4]}')
+                    ax.text(x, y-2, f'[{wp.idx_in_pattern}]t={int(wp.time)}')
                 else:
-                    ax.text(x, y-2, f'[t={str(wp.time)[:4]}')
+                    ax.text(x, y-2, f'[t={int(wp.time)}')
 
 
                 if circles:
@@ -371,6 +398,41 @@ def plan_dubins_lawnmower(num_agents,
                           straight_slack = 1,
                           kept_uncertainty_ratio_after_loop = 0.0):
 
+    # split the width into num_agents chunks and plan a path for each
+    # every other path should be flipped around the y axis
+    single_width = rect_width / num_agents
+    # these are all the same, at this point
+    timed_paths = [construct_dubins_path(swath,
+                                         single_width,
+                                         rect_height,
+                                         speed,
+                                         k,
+                                         turning_rad,
+                                         straight_slack,
+                                         kept_uncertainty_ratio_after_loop) for i in range(num_agents)]
+
+    for i, path in enumerate(timed_paths):
+        # flip'em around y
+        if i%2 != 0:
+            timed_paths[i].mirror_around_y()
+
+        # and transpose
+        dx = i*single_width
+        path.transpose(dx, 0)
+
+
+    return timed_paths
+
+
+def construct_dubins_path(swath,
+                          rect_width,
+                          rect_height,
+                          speed,
+                          k,
+                          turning_rad,
+                          straight_slack = 1,
+                          kept_uncertainty_ratio_after_loop = 0.0):
+
     def poses_to_heading(p0, p1):
         p0 = np.array(p0)
         p1 = np.array(p1)
@@ -567,131 +629,24 @@ def test_dubins_lawnmower_path(num_agents,
     k = 0.01
     kural = 0.7
 
-    planned_path = plan_dubins_lawnmower(num_agents = num_agents,
-                                         swath = swath,
-                                         k = k,
-                                         turning_rad = turning_rad,
-                                         speed = speed,
-                                         rect_height = rect_height,
-                                         rect_width = rect_width,
-                                         kept_uncertainty_ratio_after_loop = kural)
-
-
-    # just get the WPs that are about the lines, let the vehicle handle the curves itself
-    # without explicit wps for them.
-    remaining_wps = TimedPath(planned_path.line_wps)
+    planned_paths = plan_dubins_lawnmower(num_agents = num_agents,
+                                          swath = swath,
+                                          k = k,
+                                          turning_rad = turning_rad,
+                                          speed = speed,
+                                          rect_height = rect_height,
+                                          rect_width = rect_width,
+                                          kept_uncertainty_ratio_after_loop = kural)
 
     plt.ion()
     fig, ax = plt.subplots(1,1)
     ax.axis('equal')
-    ax.plot(planned_path.xs, planned_path.ys)
-    planned_path.plot_quiver(ax, circles=True)
     ax.plot([0, rect_width, rect_width,     0,                  0],
             [0, 0,          rect_height,    rect_height,        0], c='k')
+    for planned_path in planned_paths:
+        ax.plot(planned_path.xs, planned_path.ys)
+        planned_path.plot_quiver(ax, circles=True)
 
-
-
-    # simulate an AUV moving on this path
-    config = make_config(seed=42,
-                         comm=False,
-                         summarize_pg=False,
-                         num_auvs=1,
-                         num_hooks=3,
-                         hook_len=100,
-                         overlap_between_lanes=0,
-                         gap_between_rows=0,
-                         max_ticks = 1000)
-
-    np.random.seed(config.seed)
-
-    auvs, pgs, agents, paths = construct_sim_objects(config)
-
-    auv = auvs[0]
-    pg = pgs[0]
-    agent = agents[0]
-
-    auv.set_pose(planned_path.wps[0].pose)
-    current_time = -1
-    selected_wps = []
-
-    seconds_per_segment = 0.5
-
-
-    while len(remaining_wps.wps)>0:
-        # print(f"Remaining poses:{len(remaining_wps)}, time:{current_time}")
-        prev_earlyness = -1
-        best_wp = None
-        best_path = None
-        # first, we need to search for a wp in the segmented_poses that we can reach
-        # plan a path to it
-        for possible_wp_idx, possible_wp in enumerate(remaining_wps.wps):
-            desired_pose = possible_wp.pose
-            desired_time = possible_wp.time
-
-            # skip the ones that "middle" points, these are on a straight path
-            # that requires no dubins stuff
-            if possible_wp.position_in_line == TimedWaypoint.MIDDLE:
-                continue
-
-            path = dubins_path(auv.pose, desired_pose, turning_rad)
-            path_duration = path.path_length() / speed
-            reach_time = current_time + path_duration
-
-            # positive difference means we reach the point earlier than planned for
-            # can we reach a point more on time that is earlier in space?
-            # negative means we get there too late, dont even consider it
-            earlyness = desired_time - reach_time
-
-
-            # a bit of tolerance for the straight paths
-            print(f"Earlyness={earlyness}")
-            if earlyness < -2*seconds_per_segment:
-                print(f"Skipped!")
-                continue
-
-            if earlyness > prev_earlyness:
-                if best_wp is None:
-                    path_poses, _ = path.sample_many(0.5)
-                    path_poses = np.array(path_poses)
-                    best_wp = possible_wp
-                    best_path = path_poses
-
-                prev_earlyness = earlyness
-                break
-
-
-        if best_path is None or best_wp is None or best_path.shape == (0,):
-            break
-        plt.plot(best_path[:,0], best_path[:,1], c='r', alpha=0.8, linestyle='--')
-
-        selected_wps.append(best_wp)
-
-
-        drift = np.array([0., 0., 0.])
-        # only add drift where a rendezvous is going to happen,
-        # aka the "last bit" of each lawnmower line
-        if best_wp.position_in_line == TimedWaypoint.LAST:
-            # and ignore the final line as well
-            if possible_wp_idx < len(remaining_wps.wps)-1:
-                prev_wp = selected_wps[-2]
-                #make sure the prev wp is a 'first'
-                if prev_wp.position_in_line == TimedWaypoint.FIRST:
-                    dist = geom.euclid_distance(prev_wp.pose[:2], best_wp.pose[:2])
-                    drift_mag = prev_wp.uncertainty_radius + k*dist
-
-                next_pose = remaining_wps.wps[possible_wp_idx+1].pose
-                cur_pose = best_wp.pose
-                _, direction_vec = geom.vec_normalize(next_pose[:2] - cur_pose[:2])
-                drift = np.array(direction_vec) * drift_mag
-                drift = -np.array([drift[0], drift[1], 0])
-
-        # move the AUV in the worst-case direction/distance
-        worst_case_pose = drift + best_wp.pose
-
-        # hack to "move" the auv.
-        auv.set_pose(worst_case_pose)
-        current_time = best_wp.time
-        remaining_wps.wps = remaining_wps.wps[possible_wp_idx+1:]
 
 
 def test_simple_lawnmower(num_agents,
@@ -727,7 +682,7 @@ if __name__=='__main__':
     rect_width = 1000
     rect_height = 1000
     swath = 50
-    num_agents = 1
+    num_agents = 4
 
     test_dubins_lawnmower_path(num_agents, swath, rect_width, rect_height)
     test_simple_lawnmower(num_agents, swath, rect_width, rect_height)
