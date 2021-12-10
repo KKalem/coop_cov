@@ -164,38 +164,6 @@ class TimedPath(object):
 
 
 
-class MissionPlan(object):
-    def __init__(self, agent_id, waypoints):
-        self.wps = np.array(waypoints, dtype=float)
-        assert self.wps.shape[0] > 0 and self.wps.shape[1] == 2, f"Waypoints in some weird shape={self.wps.shape}"
-        self.agent_id = agent_id
-        self.current_wp_index = -1
-
-    def __repr__(self):
-        return f"Plan of {self.agent_id} {self.current_wp_index+1}/{len(self.wps)}"
-
-    @property
-    def next_wp(self):
-        if self.is_complete:
-            return None
-
-        if self.current_wp_index == -1:
-            self.current_wp_index = 0
-        return self.wps[self.current_wp_index]
-
-    @property
-    def is_complete(self):
-        return self.current_wp_index >= len(self.wps)
-
-    @property
-    def started(self):
-        return self.current_wp_index > -1
-
-    def visit_current(self):
-        self.current_wp_index += 1
-
-    def unvisit_current(self):
-        self.current_wp_index -= 1
 
 
 def plan_simple_lawnmower(num_agents,
@@ -396,7 +364,7 @@ def plan_dubins_lawnmower(num_agents,
                           k,
                           turning_rad,
                           straight_slack = 1,
-                          kept_uncertainty_ratio_after_loop = 0.0):
+                          kept_uncertainty_ratio_after_loop = 1.0):
 
     # split the width into num_agents chunks and plan a path for each
     # every other path should be flipped around the y axis
@@ -670,6 +638,91 @@ def test_simple_lawnmower(num_agents,
     for path in timed_paths:
         ax.plot(path.xs, path.ys)
         path.plot_quiver(ax)
+
+
+class MissionPlan():
+    PLAN_TYPE_SIMPLE = 0
+    PLAN_TYPE_DUBINS = 1
+
+    def __init__(self,
+                 plan_type,
+                 num_agents,
+                 swath,
+                 rect_width,
+                 rect_height,
+                 speed,
+                 uncertainty_accumulation_rate_k,
+                 turning_rad,
+                 straight_slack = 1,
+                 kept_uncertainty_ratio_after_loop = 1.0,
+                 gap_between_rows = 0,
+                 overlap_between_lanes = 0):
+
+        # for saving later
+        self.config = {'plan_type':plan_type,
+                       'num_agents':num_agents,
+                       'swath':swath,
+                       'rect_width':rect_width,
+                       'rect_height':rect_height,
+                       'speed':speed,
+                       'uncertainty_accumulation_rate_k':uncertainty_accumulation_rate_k,
+                       'turning_rad':turning_rad,
+                       'straight_slack':straight_slack,
+                       'kept_uncertainty_ratio_after_loop':kept_uncertainty_ratio_after_loop,
+                       'gap_between_rows':gap_between_rows,
+                       'overlap_between_lanes':overlap_between_lanes}
+
+
+        # generate the plan for the entire mission
+        if plan_type == MissionPlan.PLAN_TYPE_SIMPLE:
+            self.timed_paths = plan_simple_lawnmower(num_agents,
+                                                     swath,
+                                                     rect_width,
+                                                     rect_height,
+                                                     speed,
+                                                     straight_slack,
+                                                     gap_between_rows,
+                                                     overlap_between_lanes)
+        elif plan_type == MissionPlan.PLAN_TYPE_DUBINS:
+            self.timed_paths = plan_dubins_lawnmower(num_agents,
+                                                     swath,
+                                                     rect_width,
+                                                     rect_height,
+                                                     speed,
+                                                     uncertainty_accumulation_rate_k,
+                                                     turning_rad,
+                                                     straight_slack,
+                                                     kept_uncertainty_ratio_after_loop)
+        else:
+            assert False, "Unknown plan type!"
+
+        # keep track of which AUV is where
+        self.current_wp_indices = [-1 for i in range(num_agents)]
+        self.num_agents = num_agents
+
+
+    def get_current_wp(self, auv_id):
+        assert auv_id < self.num_agents, "AUV IDs should be in [0...N)"
+
+        current_idx = self.current_wp_indices[auv_id]
+        if current_idx < 0 or current_idx >= len(self.timed_paths[auv_id]):
+            return None
+
+        return self.timed_paths.wps[current_idx]
+
+
+    def visit_current_wp(self, auv_id):
+        assert auv_id < self.num_agents, "AUV IDs should be in [0...N)"
+        self.current_wp_indices[auv_id] += 1
+
+
+    @property
+    def is_complete(self):
+        if all([idx >= len(self.timed_path) for idx, timed_path in zip(self.current_wp_indices, self.timed_paths)]):
+            return True
+        return False
+
+
 
 
 if __name__=='__main__':
