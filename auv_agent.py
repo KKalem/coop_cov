@@ -6,19 +6,21 @@
 import numpy as np
 from toolbox import geometry as geom
 from auv import AUV
+from mission_plan import TimedWaypoint, MissionPlan
 
 
 class Agent(object):
     def __init__(self,
                  real_auv,
                  pose_graph,
-                 waypoints):
+                 mission_plan):
 
         # a reference to the actual physical auv
         # for ceonvenience
         self._real_auv = real_auv
 
         self.pg = pose_graph
+        self.mission_plan = mission_plan
 
         # this auv model will be used to create the pose graph from
         # noisy measurements of the real auv
@@ -30,11 +32,13 @@ class Agent(object):
                                 auv_length = real_auv.auv_length,
                                 max_turn_angle = real_auv.max_turn_angle)
 
+        self.id = real_auv.auv_id
 
-        self.current_wp_idx = 0
-        self.waypoints = waypoints
+        # keep track of time passed for waiting purposes
+        self.time = 0
 
-        self.clock = 0
+        # to keep track of when we were connected to another auv
+        # so that we can optimize the PG when we disconnect
         self.connection_trace = []
 
         # keep a record of how many vertices and edges we received through "fill_in_since_last_interaction"
@@ -42,11 +46,6 @@ class Agent(object):
         self.received_data = {'verts':[(0.,0.)],
                               'edges':[(0.,0.)]}
 
-    @property
-    def waypoints_exhausted(self):
-        if self.current_wp_idx >= len(self.waypoints):
-            return True
-        return False
 
     def log(self, *args):
         if len(args) == 1:
@@ -64,24 +63,34 @@ class Agent(object):
         # measure real auv (heading?), apply onto internal auv
         # update pose graph with internal auv
 
+        self.time += dt
 
-        self.clock += dt
+        current_timed_wp = self.mission_plan.get_current_wp(self.id)
 
-        if self.internal_auv.reached_target and not self.waypoints_exhausted:
-            self.current_wp_idx += 1
+        if current_timed_wp is None or (self.internal_auv.reached_target and self.time >= current_timed_wp.time):
+            # we have reached the point, and we dont need to wait here
+            # get the next wp
+            self.mission_plan.visit_current_wp(self.id)
+            current_timed_wp = self.mission_plan.get_current_wp(self.id)
 
-        if self.waypoints_exhausted:
+        if current_timed_wp is None:
+            # this agent is 'done'
+            # do nothing
             return
 
 
-        current_wp = self.waypoints[self.current_wp_idx]
-        cover = False
-        # where are we within a hook?
-        # each hook is 5 wps.
-        if self.current_wp_idx%5 in [1,3]:
-            cover=True
+        # if this is a 'last' waypoint, stop covering
+        # if its a 'first', start covering
+        if current_timed_wp.position_in_line == TimedWaypoint.FIRST:
+            cover = True
+        else:
+            cover = False
 
-        self.internal_auv.set_target(current_wp, cover=cover)
+        # TODO do a dubins plan here to determine the position
+        # the auv controller should stay as a simple heading controller only
+        target_posi = current_timed_wp.pose[:2]
+
+        self.internal_auv.set_target(target_posi, cover=cover)
 
         # control real auv with what the internal one thinks
         td, ta = self.internal_auv.update(dt)
@@ -120,8 +129,8 @@ class Agent(object):
                                            other_pg = agent.pg)
 
                 num_vs, num_es = self.pg.fill_in_since_last_interaction(agent.pg, use_summary=summarize_pg)
-                self.received_data['verts'].append((self.clock, num_vs))
-                self.received_data['edges'].append((self.clock, num_es))
+                self.received_data['verts'].append((self.time, num_vs))
+                self.received_data['edges'].append((self.time, num_es))
 
                 # was not connected, just connected
                 if not recorded:
@@ -150,6 +159,98 @@ class Agent(object):
         error = final_error / travel
         self.log(f"Travel: {travel}, err:{final_error}, percent:{error*100}")
         return error
+
+
+
+
+
+if __name__ == '__main__':
+    import matplotlib.pyplot as plt
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.ion()
+    from pose_graph import PoseGraph, PGO_VertexIdStore
+    from drift_model import DriftModel
+
+    mplan = MissionPlan(plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
+                        num_agents = 5,
+                        swath = 50,
+                        rect_width = 200,
+                        rect_height = 500,
+                        speed = 1.5,
+                        uncertainty_accumulation_rate_k = 0.01,
+                        turning_rad = 5)
+
+    pg_id_store = PGO_VertexIdStore()
+
+    agents = []
+    for i, timed_path in enumerate(mplan.timed_paths):
+        auv = AUV(auv_id = i,
+                  init_pos = timed_path.wps[0].pose[:2],
+                  init_heading = timed_path.wps[0].pose[2],
+                  target_threshold = 5,
+                  forward_speed = mplan.config['speed'])
+
+        pg = PoseGraph(pg_id = i,
+                       id_store = pg_id_store)
+
+        agent = Agent(real_auv = auv,
+                      pose_graph = pg,
+                      mission_plan = mplan)
+
+        agents.append(agent)
+
+
+
+    drift_model = DriftModel(num_spirals = 10,
+                             num_ripples = 0,
+                             area_xsize = mplan.config['rect_width'],
+                             area_ysize = mplan.config['rect_height'],
+                             scale_size = 1)
+
+
+    seed = 142
+    np.random.seed(seed)
+
+    dt = 0.05
+    step = 0
+    while True:
+        # print(f'Step {step}, time {step*dt}')
+        step += 1
+        for agent in agents:
+            # drift_x, drift_y = drift_model.sample(agent._real_auv.pos[0], agent._real_auv.pos[1])
+            drift_x, drift_y = 0,0
+
+            agent.update(dt = dt,
+                         drift_x = drift_x*dt*0.01,
+                         drift_y = drift_y*dt*0.01)
+
+        if mplan.is_complete:
+            break
+
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
+
+    drift_model.visualize(ax, 10, alpha=0.3)
+
+    for agent in agents:
+        real_trace = agent._real_auv.pose_trace
+        if len(real_trace) > 0:
+            ax.plot(real_trace[:,0], real_trace[:,1], alpha=0.5)
+            internal_trace = agent.internal_auv.pose_trace
+            ax.plot(internal_trace[:,0], internal_trace[:,1], alpha=0.5, linestyle='--')
+
+    for path in mplan.timed_paths:
+        ax.plot(path.xs, path.ys, alpha=0.1, linestyle=':')
+        path.plot_quiver(ax)
+
+
+
+
+
+    ag = agents[0]
+    auv = ag._real_auv
+
 
 
 

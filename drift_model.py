@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 # vim:fenc=utf-8
 
-
-
 import numpy as np
+from matplotlib import patches
 
 
 def normalize(ux, uy, limit=None):
@@ -120,7 +119,7 @@ class DriftModel:
         return uxs, uys
 
 
-    def visualize(self, ax, meters_between_arrows):
+    def visualize(self, ax, meters_between_arrows, alpha=1.0):
         x_count = int(self.area_xsize / meters_between_arrows)
         y_count = int(self.area_ysize / meters_between_arrows)
 
@@ -131,10 +130,10 @@ class DriftModel:
         uxs, uys = self.sample(xs, ys)
 
         colors = np.arctan2(uys, uxs)
-        ax.quiver(xs, ys, uxs, uys, colors, cmap='hsv')
+        ax.quiver(xs, ys, uxs, uys, colors, cmap='hsv', alpha=alpha)
         ax.scatter(self.xcenters, self.ycenters, c='k')
         for x,y, xsc, ysc in zip(self.xcenters, self.ycenters, self.xscales, self.yscales):
-            e = patches.Ellipse((x,y), xsc*10, ysc*10, fill=True, alpha=0.2, color='b')
+            e = patches.Ellipse((x,y), xsc*10, ysc*10, fill=True, alpha=alpha, color='b')
             ax.add_patch(e)
 
 
@@ -146,7 +145,6 @@ if __name__ == '__main__':
 
     import sys
     import matplotlib.pyplot as plt
-    from matplotlib import patches
 
     plt.rcParams['pdf.fonttype'] = 42
     plt.ion()

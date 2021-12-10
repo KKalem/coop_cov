@@ -708,7 +708,7 @@ class MissionPlan():
         if current_idx < 0 or current_idx >= len(self.timed_paths[auv_id]):
             return None
 
-        return self.timed_paths.wps[current_idx]
+        return self.timed_paths[auv_id].wps[current_idx]
 
 
     def visit_current_wp(self, auv_id):
@@ -716,9 +716,11 @@ class MissionPlan():
         self.current_wp_indices[auv_id] += 1
 
 
+
+
     @property
     def is_complete(self):
-        if all([idx >= len(self.timed_path) for idx, timed_path in zip(self.current_wp_indices, self.timed_paths)]):
+        if all([idx >= len(timed_path) for idx, timed_path in zip(self.current_wp_indices, self.timed_paths)]):
             return True
         return False
 
