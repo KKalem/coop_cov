@@ -49,6 +49,9 @@ class AUV(object):
         self.target_pos = None
         self.target_threshold = target_threshold
 
+        # for drift calculations outside the AUV
+        self.last_moved_distance = 0
+
 
     def __str__(self):
         return f'[auv:{self.auv_id}@{self.pose}]'
@@ -128,30 +131,17 @@ class AUV(object):
         max_turn = np.deg2rad(self.max_turn_angle)
         steering_angle = turn_direction * min(max_turn, abs(turn_amount))
 
-        # simple dubins motion model
+        # simple  motion model
         beta = np.arctan2(np.tan(steering_angle), 2)
         dx = dt * self.forward_speed * np.cos(self.heading + beta)
         dy = dt * self.forward_speed * np.sin(self.heading + beta)
         dh = dt * self.forward_speed * np.tan(steering_angle) * np.cos(beta) / self.auv_length
 
-        # some weirder dubins motion model, they produce exactly the same plot tho lol
-        # dist = self.forward_speed * dt
-        # hdg = self.heading
-        # if abs(steering_angle) > 0.001: # is robot turning?
-            # beta = (dist / self.auv_length) * np.tan(steering_angle)
-            # r = self.auv_length / np.tan(steering_angle) # radius
+        total_dx = dx + drift_x
+        total_dy = dy + drift_y
+        self.last_moved_distance = np.linalg.norm([total_dx, total_dy])
 
-            # dx = -r*np.sin(hdg) + r*np.sin(hdg + beta)
-            # dy =  r*np.cos(hdg) - r*np.cos(hdg + beta)
-            # dh = beta
-
-        # else: # moving in straight line
-            # dx = dist*np.cos(hdg)
-            # dy = dist*np.sin(hdg)
-            # dh = 0.
-
-        self.pos += [dx,dy]
-        self.pos += [drift_x, drift_y]
+        self.pos += [total_dx, total_dy]
         self.set_heading(self.heading + dh + drift_heading)
         return turn_direction, turn_amount
 

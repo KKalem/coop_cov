@@ -74,7 +74,7 @@ class TimedPath(object):
         return f"<path begins={self.wps[0]}, ends={self.wps[-1]}>"
 
     def __len__(self):
-        return len(self.wps)
+        return len(self.line_wps)
 
     @property
     def xs(self):
@@ -84,6 +84,8 @@ class TimedPath(object):
     def ys(self):
         return [wp.pose[1] for wp in self.wps]
 
+
+
     @property
     def headings(self):
         return [wp.pose[2] for wp in self.wps]
@@ -91,6 +93,10 @@ class TimedPath(object):
     @property
     def times(self):
         return [wp.time for wp in self.wps]
+
+    @property
+    def last_time(self):
+        return self.wps[-1].time
 
     @property
     def line_idxs(self):
@@ -138,29 +144,37 @@ class TimedPath(object):
 
 
 
-    def plot_quiver(self, ax, circles=False):
+    def visualize(self, ax, wp_labels=False, circles=False, alpha=0.2, c=None):
+        ax.plot(self.xs, self.ys, alpha=alpha+0.2, linestyle=':', c=c)
+
         for wp in self.wps:
             if wp.position_in_line != TimedWaypoint.MIDDLE:
                 x,y,ux,uy = wp.arrow()
-                if wp.idx_in_pattern is not None:
-                    ax.text(x, y-2, f'[{wp.idx_in_pattern}]t={int(wp.time)}')
-                else:
-                    ax.text(x, y-2, f'[t={int(wp.time)}')
+                ax.arrow(x,y,ux,uy, color=c, alpha=alpha)
+
+                if wp_labels:
+                    if wp.idx_in_pattern is not None:
+                        ax.text(x, y-2, f'[{wp.idx_in_pattern}]t={int(wp.time)}')
+                    else:
+                        ax.text(x, y-2, f'[t={int(wp.time)}')
 
 
                 if circles:
+                    if c is None:
+                        c = 'blue'
+
                     ax.add_patch(pltpatches.Circle((x,y),
                                                    radius=wp.uncertainty_radius,
-                                                   ec='blue',
-                                                   fc='blue',
-                                                   alpha=0.5))
+                                                   ec=c,
+                                                   fc=c,
+                                                   alpha=alpha))
                     # ax.text(x+5, y-5, f'r={str(wp.uncertainty_radius)[:5]}')
                     if wp.uncertainty_radius_before_loop_closure is not None:
                         ax.add_patch(pltpatches.Circle((x,y),
                                                        radius=wp.uncertainty_radius_before_loop_closure,
-                                                       ec='blue',
-                                                       fc='blue',
-                                                       alpha=0.2))
+                                                       ec=c,
+                                                       fc=c,
+                                                       alpha=alpha*0.5))
 
 
 
@@ -399,7 +413,7 @@ def construct_dubins_path(swath,
                           k,
                           turning_rad,
                           straight_slack = 1,
-                          kept_uncertainty_ratio_after_loop = 0.0):
+                          kept_uncertainty_ratio_after_loop = 1.0):
 
     def poses_to_heading(p0, p1):
         p0 = np.array(p0)
@@ -480,7 +494,7 @@ def construct_dubins_path(swath,
     # for this application
     b = swath
 
-    early_quit = False
+    filled_rect = False
     for i in range(23):
         prev_wp = path.wps[-1]
 
@@ -500,7 +514,6 @@ def construct_dubins_path(swath,
         # again, ignore +b in the paranthesis because no accumulation there
         c_i = swath - k*(s_new + s_old)
         if c_i <= 0:
-            early_quit = True
             break
 
         # above "wp0" and left of wp2
@@ -536,7 +549,7 @@ def construct_dubins_path(swath,
         path.append(wp3)
 
         if rect_height < wp3.pose[1] - swath/2. - wp3.uncertainty_radius_before_loop_closure:
-            print('wp3 break')
+            filled_rect = True
             break
 
 
@@ -582,7 +595,11 @@ def construct_dubins_path(swath,
 
         s_old = s_new
         if rect_height < wp5.pose[1] - swath/2. - wp5.uncertainty_radius_before_loop_closure:
+            filled_rect = True
             break
+
+    if not filled_rect:
+        print("Plan is incomplete!")
 
     return path
 
@@ -613,7 +630,7 @@ def test_dubins_lawnmower_path(num_agents,
             [0, 0,          rect_height,    rect_height,        0], c='k')
     for planned_path in planned_paths:
         ax.plot(planned_path.xs, planned_path.ys)
-        planned_path.plot_quiver(ax, circles=True)
+        planned_path.visualize(ax, circles=True)
 
 
 
@@ -637,7 +654,7 @@ def test_simple_lawnmower(num_agents,
 
     for path in timed_paths:
         ax.plot(path.xs, path.ys)
-        path.plot_quiver(ax)
+        path.visualize(ax)
 
 
 class MissionPlan():
@@ -700,6 +717,8 @@ class MissionPlan():
         self.current_wp_indices = [-1 for i in range(num_agents)]
         self.num_agents = num_agents
 
+        self.last_planned_time = max( [tp.last_time for tp in self.timed_paths] )
+        print(f"Planned for {self.last_planned_time}s")
 
     def get_current_wp(self, auv_id):
         assert auv_id < self.num_agents, "AUV IDs should be in [0...N)"
@@ -708,14 +727,12 @@ class MissionPlan():
         if current_idx < 0 or current_idx >= len(self.timed_paths[auv_id]):
             return None
 
-        return self.timed_paths[auv_id].wps[current_idx]
+        return self.timed_paths[auv_id].line_wps[current_idx]
 
 
     def visit_current_wp(self, auv_id):
         assert auv_id < self.num_agents, "AUV IDs should be in [0...N)"
         self.current_wp_indices[auv_id] += 1
-
-
 
 
     @property
@@ -724,6 +741,34 @@ class MissionPlan():
             return True
         return False
 
+
+    @property
+    def bounding_rectangle(self):
+        xs = []
+        ys = []
+        for path in self.timed_paths:
+            xis, yis = path.xs, path.ys
+            xs.extend(xis)
+            ys.extend(yis)
+
+        minx = min(xs)
+        maxx = max(xs)
+        miny = min(ys)
+        maxy = max(ys)
+        rectxs = [minx, maxx, maxx, minx]
+        rectys = [miny, miny, maxy, maxy]
+        return rectxs, rectys
+
+
+    def visualize(self, ax, alpha=0.5):
+        rect_width = self.config['rect_width']
+        rect_height = self.config['rect_height']
+
+        ax.plot([0, rect_width, rect_width,     0,                  0],
+                [0, 0,          rect_height,    rect_height,        0], c='k', alpha=alpha)
+
+        for path in self.timed_paths:
+            path.visualize(ax, wp_labels=False, circles=True, alpha=0.1, c='k')
 
 
 
