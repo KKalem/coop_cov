@@ -468,6 +468,13 @@ def construct_dubins_path(swath,
             path.append(wp_dubins)
 
 
+    def rect_complete(wp):
+        r = wp.uncertainty_radius_before_loop_closure
+        y = wp.pose[1]
+
+        completely_outside = rect_height < y - r - swath/2.
+        within_swath = rect_height < y - r + swath/2.
+        return completely_outside or within_swath
 
     # start from bottom left, looking at wp1
     wp0_posi = [0., swath/2.]
@@ -546,6 +553,7 @@ def construct_dubins_path(swath,
                             uncertainty_radius = prev_wp.uncertainty_radius,
                             idx_in_pattern=2)
 
+
         wp3 = TimedWaypoint(pose = wp3_pose,
                             time = wp2.time + wp23_time,
                             line_idx = wp2.line_idx,
@@ -557,10 +565,13 @@ def construct_dubins_path(swath,
 
         path.append(wp2)
         path.append(wp3)
-
-        if rect_height < wp3.pose[1] - swath/2. - wp3.uncertainty_radius_before_loop_closure:
+        if rect_complete(wp3):
             filled_rect = True
             break
+
+        # if rect_height < wp3.pose[1] - swath/2. - wp3.uncertainty_radius_before_loop_closure:
+            # filled_rect = True
+            # break
 
 
         # just above wp3
@@ -602,11 +613,16 @@ def construct_dubins_path(swath,
 
         path.append(wp4)
         path.append(wp5)
-
-        s_old = s_new
-        if rect_height < wp5.pose[1] - swath/2. - wp5.uncertainty_radius_before_loop_closure:
+        if rect_complete(wp5):
             filled_rect = True
             break
+
+        s_old = s_new
+        # if rect_height < wp5.pose[1] - swath/2. - wp5.uncertainty_radius_before_loop_closure:
+            # filled_rect = True
+            # break
+
+
 
     if not filled_rect:
         print("Plan is incomplete!")
@@ -621,8 +637,8 @@ def test_dubins_lawnmower_path(num_agents,
 
     speed = 1.5
     turning_rad = 5
-    k = 0.01
-    kural = 0.7
+    k = 0.05
+    kural = 0.8
 
     planned_paths = plan_dubins_lawnmower(num_agents = num_agents,
                                           swath = swath,
@@ -791,11 +807,11 @@ if __name__=='__main__':
     from main import construct_sim_objects, make_config
     plt.ion()
 
-    rect_width = 1000
-    rect_height = 1000
+    rect_width = 200
+    rect_height = 200
     swath = 50
-    num_agents = 4
+    num_agents = 2
 
     test_dubins_lawnmower_path(num_agents, swath, rect_width, rect_height)
-    test_simple_lawnmower(num_agents, swath, rect_width, rect_height)
+    # test_simple_lawnmower(num_agents, swath, rect_width, rect_height)
 
