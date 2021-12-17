@@ -84,8 +84,6 @@ class TimedPath(object):
     def ys(self):
         return [wp.pose[1] for wp in self.wps]
 
-
-
     @property
     def headings(self):
         return [wp.pose[2] for wp in self.wps]
@@ -150,7 +148,7 @@ class TimedPath(object):
         for wp in self.wps:
             if wp.position_in_line != TimedWaypoint.MIDDLE:
                 x,y,ux,uy = wp.arrow()
-                ax.arrow(x,y,ux,uy, color=c, alpha=alpha)
+                ax.arrow(x,y,ux*3,uy*3, color=c, alpha=alpha*2)
 
                 if wp_labels:
                     if wp.idx_in_pattern is not None:
@@ -227,7 +225,11 @@ def plan_simple_lawnmower(num_agents,
     # and now create a timed path out of these points
     timed_paths = []
     for path in paths:
-        wp = TimedWaypoint(pose = list(path[0]) + [0.],
+        init_posi = np.array(path[0])
+        second_posi = np.array(path[1])
+        vec = second_posi - init_posi
+        init_heading = np.arctan2(vec[1], vec[0])
+        wp = TimedWaypoint(pose = list(path[0]) + [init_heading],
                            time = 0,
                            line_idx = 0,
                            position_in_line = TimedWaypoint.FIRST)
@@ -235,26 +237,34 @@ def plan_simple_lawnmower(num_agents,
         timed_path = TimedPath([wp])
         current_line_idx = 0
         for i in range(1, len(path)):
-            prev = timed_path.wps[i-1]
-
-            heading_vec = path[i] - prev.pose[:2]
-            heading_angle = np.arctan2(heading_vec[1], heading_vec[0])
-
-            dist = geom.euclid_distance(prev.pose[:2], path[i])
-
             # at 1,3,5... start a new line
             if i-1%2 == 0:
                 current_line_idx += 1
+
+            prev_wp = timed_path.wps[i-1]
+            dist = geom.euclid_distance(prev_wp.pose[:2], path[i])
 
             # even poses are firsts, odds are lasts
             # in this lawnmower, there are no mids
             if i%2 == 0:
                 posi = TimedWaypoint.FIRST
+                # then the heading is towards the next point
+                if i+1 < len(path):
+                    next_posi = path[i+1][:2]
+                    current_posi = path[i][:2]
+                    heading_vec = next_posi - current_posi
+                    heading_angle = np.arctan2(heading_vec[1], heading_vec[0])
+                else:
+                    # might be the last point, shouldnt ever happen if its a FIRST
+                    # but still handle
+                    heading_angle = 0.
             else:
                 posi = TimedWaypoint.LAST
+                # heading is same as previous point
+                heading_angle = prev_wp.pose[2]
 
             wp = TimedWaypoint(pose = list(path[i]) + [heading_angle],
-                               time = prev.time + dist/speed + straight_slack,
+                               time = prev_wp.time + dist/speed + straight_slack,
                                line_idx = current_line_idx,
                                position_in_line = posi)
 
@@ -670,6 +680,7 @@ class MissionPlan():
                  speed,
                  uncertainty_accumulation_rate_k,
                  turning_rad,
+                 comm_range,
                  straight_slack = 1,
                  kept_uncertainty_ratio_after_loop = 1.0,
                  gap_between_rows = 0,
@@ -684,6 +695,7 @@ class MissionPlan():
                        'speed':speed,
                        'uncertainty_accumulation_rate_k':uncertainty_accumulation_rate_k,
                        'turning_rad':turning_rad,
+                       'comm_range':comm_range,
                        'straight_slack':straight_slack,
                        'kept_uncertainty_ratio_after_loop':kept_uncertainty_ratio_after_loop,
                        'gap_between_rows':gap_between_rows,
