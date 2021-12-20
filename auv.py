@@ -49,8 +49,8 @@ class AUV(object):
         self.target_pos = None
         self.target_threshold = target_threshold
 
-        # for drift calculations outside the AUV
-        self.last_moved_distance = 0
+        # keep track of how much we moved for later analysis and drift calcs
+        self.distances_traveled = [0]
 
 
     def __str__(self):
@@ -62,12 +62,12 @@ class AUV(object):
         print(f'[AUV:{self.auv_id}]\t{args}')
 
     @property
-    def distance_traveled(self):
-        trace = self.pose_trace
-        diffs = trace[:-1, :2] - trace[1:, :2]
-        lens = geom.vec_len(diffs)
-        dist = sum(lens)
-        return dist
+    def last_moved_distance(self):
+        return self.distances_traveled[-1]
+
+    @property
+    def total_distance_traveled(self):
+        return sum(self.distances_traveled)
 
 
     @property
@@ -139,7 +139,8 @@ class AUV(object):
 
         total_dx = dx + drift_x
         total_dy = dy + drift_y
-        self.last_moved_distance = np.linalg.norm([total_dx, total_dy])
+        dist_traveled = np.linalg.norm([total_dx, total_dy])
+        self.distances_traveled.append(dist_traveled)
 
         self.pos += [total_dx, total_dy]
         self.set_heading(self.heading + dh + drift_heading)

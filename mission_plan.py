@@ -36,6 +36,9 @@ class TimedWaypoint(object):
         self.uncertainty_radius_before_loop_closure = uncertainty_radius_before_loop_closure
         self.idx_in_pattern = idx_in_pattern
 
+        # for agents to keep track if this WP had its rendezvous happened already
+        self.rendezvous_happened = False
+
 
     def __repr__(self):
         return f"<pose {self.pose}, r={self.uncertainty_radius}, t={self.time}, line={self.line_idx}, pos_in_line={TimedWaypoint.pos_to_str[self.position_in_line]}>"
@@ -114,8 +117,9 @@ class TimedPath(object):
         return s
 
 
-    def mirror_around_x(self):
-        middle = np.average(self.ys)
+    def mirror_around_x(self=None):
+        if middle is None:
+            middle = np.average(self.ys)
         for wp in self.wps:
             x,y,h = wp.pose
             new_y = (-(y - middle))+middle
@@ -124,8 +128,9 @@ class TimedPath(object):
             new_h = np.arctan2(-h_vec_y, h_vec_x)
             wp.pose = np.array([x, new_y, new_h])
 
-    def mirror_around_y(self):
-        middle = np.average(self.xs)
+    def mirror_around_y(self, middle=None):
+        if middle is None:
+            middle = np.average(self.xs)
         for wp in self.wps:
             x,y,h = wp.pose
             new_x = (-(x - middle))+middle
@@ -406,7 +411,7 @@ def plan_dubins_lawnmower(num_agents,
     for i, path in enumerate(timed_paths):
         # flip'em around y
         if i%2 != 0:
-            timed_paths[i].mirror_around_y()
+            timed_paths[i].mirror_around_y(single_width/2.)
 
         # and transpose
         dx = i*single_width
@@ -569,10 +574,6 @@ def construct_dubins_path(swath,
             filled_rect = True
             break
 
-        # if rect_height < wp3.pose[1] - swath/2. - wp3.uncertainty_radius_before_loop_closure:
-            # filled_rect = True
-            # break
-
 
         # just above wp3
         wp4_posi = [wp3_posi[0], wp3_posi[1] + b]
@@ -618,9 +619,6 @@ def construct_dubins_path(swath,
             break
 
         s_old = s_new
-        # if rect_height < wp5.pose[1] - swath/2. - wp5.uncertainty_radius_before_loop_closure:
-            # filled_rect = True
-            # break
 
 
 
@@ -630,57 +628,6 @@ def construct_dubins_path(swath,
     return path
 
 
-def test_dubins_lawnmower_path(num_agents,
-                               swath,
-                               rect_width,
-                               rect_height):
-
-    speed = 1.5
-    turning_rad = 5
-    k = 0.05
-    kural = 0.8
-
-    planned_paths = plan_dubins_lawnmower(num_agents = num_agents,
-                                          swath = swath,
-                                          k = k,
-                                          turning_rad = turning_rad,
-                                          speed = speed,
-                                          rect_height = rect_height,
-                                          rect_width = rect_width,
-                                          kept_uncertainty_ratio_after_loop = kural)
-
-    plt.ion()
-    fig, ax = plt.subplots(1,1)
-    ax.axis('equal')
-    ax.plot([0, rect_width, rect_width,     0,                  0],
-            [0, 0,          rect_height,    rect_height,        0], c='k')
-    for planned_path in planned_paths:
-        ax.plot(planned_path.xs, planned_path.ys)
-        planned_path.visualize(ax, circles=True)
-
-
-
-def test_simple_lawnmower(num_agents,
-                          swath,
-                          rect_width,
-                          rect_height):
-
-    speed = 1.5
-
-    timed_paths = plan_simple_lawnmower(num_agents,
-                                        swath,
-                                        rect_width,
-                                        rect_height,
-                                        speed)
-
-    fig, ax = plt.subplots(1,1)
-    ax.axis('equal')
-    ax.plot([0, rect_width, rect_width,     0,                  0],
-            [0, 0,          rect_height,    rect_height,        0], c='k')
-
-    for path in timed_paths:
-        ax.plot(path.xs, path.ys)
-        path.visualize(ax)
 
 
 class MissionPlan():
@@ -803,15 +750,23 @@ class MissionPlan():
 if __name__=='__main__':
     import matplotlib.pyplot as plt
     plt.rcParams['pdf.fonttype'] = 42
-    from matplotlib.patches import Polygon, Circle
-    from main import construct_sim_objects, make_config
     plt.ion()
 
-    rect_width = 200
-    rect_height = 200
-    swath = 50
-    num_agents = 2
+    mplan = MissionPlan(
+        plan_type = MissionPlan.PLAN_TYPE_DUBINS,
+        # plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
+        num_agents = 3,
+        swath = 50,
+        rect_width = 200,
+        rect_height = 200,
+        speed = 1.5,
+        uncertainty_accumulation_rate_k = 0.05,
+        kept_uncertainty_ratio_after_loop = 0.8,
+        turning_rad = 5,
+        comm_range = 10
+    )
 
-    test_dubins_lawnmower_path(num_agents, swath, rect_width, rect_height)
-    # test_simple_lawnmower(num_agents, swath, rect_width, rect_height)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
+    mplan.visualize(ax)
 
