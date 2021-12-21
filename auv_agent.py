@@ -52,11 +52,12 @@ class Agent(object):
         self.received_data = {'verts':[(0.,0.)],
                               'edges':[(0.,0.)]}
 
-        # list of distances between real auv and internal auv
+        # list of distances between real auv and internal auv (time,err)
         self.real_errors = []
         # list of distances the real auv moved
         self.real_moved_dists = []
-
+        # keep track of how much our error drops after optimizing (time,drop)
+        self.position_error_drops = []
         # list of current_time - wp.time
         self.waypoint_reaching_times = []
 
@@ -103,15 +104,16 @@ class Agent(object):
         else:
             dist = geom.euclid_distance(self.internal_auv.pose[:2], current_timed_wp.pose[:2])
             at_target = dist <= self.internal_auv.target_threshold
-            if at_target:
+            within_error_circle = dist <= current_timed_wp.uncertainty_radius_before_loop_closure
+            rendezvous_happened = current_timed_wp.rendezvous_happened and\
+                    current_timed_wp.idx_in_pattern in [1,3,5]
+            # either at the target, or we can skip the rest of the line because
+            # we basically "met in the middle" with someone else
+            if at_target or (within_error_circle and rendezvous_happened):
                 self.waypoint_reaching_times.append((self.time, self.time - current_timed_wp.time))
                 wp_time_reached = self.time >= current_timed_wp.time
                 # only skip waiting at purely rendezvous WPs, wps 2 and 4 are for lining up
-                rendezvous_happened = current_timed_wp.rendezvous_happened and\
-                        current_timed_wp.idx_in_pattern in [1,3,5]
                 if wp_time_reached or rendezvous_happened:
-                    if rendezvous_happened:
-                        self.log(f"Rendezvous skip, lateness={self.time - current_timed_wp.time}s")
                     # we have reached the point, and we dont need to wait here
                     # get the next wp
                     self.mission_plan.visit_current_wp(self.id)
@@ -266,20 +268,27 @@ class Agent(object):
             if self.connection_trace[-1] != self.connection_trace[-2]:
                 success = self.pg.optimize(use_summary=summarize_pg, save_before=False)
                 if success:
+                    err_before = self.distance_traveled_error(just_error=True)
                     self.internal_auv.set_pose(self.pg.odom_tip_vertex.pose)
                     self.viz_optim_points.append(self.internal_auv.pose)
-                    # also reset the dubins plan? so that we may re-plan next update?
+                    # we should re-plan next update with the correcter est.
                     self.current_dubins_points = []
+                    err_after = self.distance_traveled_error(just_error=True)
+                    err_drop = err_before - err_after
+                    self.position_error_drops.append((self.time, err_drop))
 
 
 
-    def distance_traveled_error(self):
+    def distance_traveled_error(self, just_error = False):
         # from the GT auv, find distance traveled
         if self.time < 10:
             return 0
 
-        travel = self._real_auv.distance_traveled
         final_error = geom.euclid_distance(self._real_auv.apose, self.internal_auv.apose)
+        if just_error:
+            return final_error
+
+        travel = self._real_auv.total_distance_traveled
         error = final_error / travel
         return error
 
@@ -313,56 +322,8 @@ class Agent(object):
 
 
 
-
-
-
-
-if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    plt.rcParams['pdf.fonttype'] = 42
-    plt.ion()
-    from pose_graph import PoseGraph, PGO_VertexIdStore
-    from drift_model import DriftModel
-    from tqdm import tqdm
-    import sys
-
-    try:
-        seed = int(sys.argv[1])
-        print(f'Given seed={seed}')
-    except:
-        import time
-        seed = int(time.time())
-        print(f'Time seed={seed}')
-
+def run_mission(seed, dt, mplan, drift_model):
     np.random.seed(seed)
-    dt = 0.05
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111, aspect='equal')
-
-
-    mplan = MissionPlan(
-        plan_type = MissionPlan.PLAN_TYPE_DUBINS,
-        # plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
-        num_agents = 6,
-        swath = 50,
-        rect_width = 6*200,
-        rect_height = 1000,
-        speed = 1.5,
-        uncertainty_accumulation_rate_k = 0.05,
-        kept_uncertainty_ratio_after_loop = 0.8,
-        turning_rad = 5,
-        comm_range = 10
-    )
-
-    drift_model = DriftModel(
-        num_spirals = 10,
-        num_ripples = 0,
-        area_xsize = mplan.config['rect_width'],
-        area_ysize = mplan.config['rect_height'],
-        scale_size = 1
-    )
-
     pg_id_store = PGO_VertexIdStore()
 
     agents = []
@@ -382,11 +343,6 @@ if __name__ == '__main__':
                       drift_model = drift_model)
 
         agents.append(agent)
-
-
-
-
-
 
     step = 0
     with tqdm(total = mplan.last_planned_time) as pbar:
@@ -408,8 +364,59 @@ if __name__ == '__main__':
 
             pbar.update(dt)
 
+    return agents
 
 
+
+
+
+if __name__ == '__main__':
+    import matplotlib.pyplot as plt
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.ion()
+    from pose_graph import PoseGraph, PGO_VertexIdStore
+    from drift_model import DriftModel
+    from tqdm import tqdm
+    import sys
+
+    try:
+        seed = int(sys.argv[1])
+        print(f'Given seed={seed}')
+    except:
+        import time
+        seed = int(time.time())
+        print(f'Time seed={seed}')
+
+    dt = 0.05
+
+    mplan = MissionPlan(
+        # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
+        plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
+        num_agents = 3,
+        swath = 50,
+        rect_width = 450,
+        rect_height = 200,
+        speed = 1.5,
+        uncertainty_accumulation_rate_k = 0.05,
+        kept_uncertainty_ratio_after_loop = 1.0,
+        turning_rad = 5,
+        comm_range = 50
+    )
+
+    drift_model = DriftModel(
+        num_spirals = 10,
+        num_ripples = 0,
+        area_xsize = mplan.config['rect_width'],
+        area_ysize = mplan.config['rect_height'],
+        scale_size = 1
+    )
+
+
+    agents = run_mission(seed, dt, mplan, drift_model)
+
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
 
     drift_model.visualize(ax, 10, rect=mplan.bounding_rectangle, alpha=0.3)
     mplan.visualize(ax, alpha=0.5)
@@ -417,27 +424,43 @@ if __name__ == '__main__':
     for agent in agents:
         agent.visualize(ax)
 
-    plt.figure()
-    for agent in agents:
-        times, errs = zip(*agent.real_errors)
-        times, dists = zip(*agent.real_moved_dists)
-        distances_traveled = np.cumsum(dists)
-        errs = errs / distances_traveled
-        plt.scatter(times, errs, c=agent.color, alpha=0.5)
-    plt.title("Positioning error")
-    plt.xlabel("Time(s)")
-    plt.ylabel("Error(m/m)")
+    def plot_errors():
+        plt.figure()
+        for agent in agents:
+            times, errs = zip(*agent.real_errors)
+            times, dists = zip(*agent.real_moved_dists)
+            distances_traveled = np.cumsum(dists)
+            errs = errs / distances_traveled
+            plt.scatter(times, errs, c=agent.color, alpha=0.5)
+        plt.title("Positioning error")
+        plt.xlabel("Time(s)")
+        plt.ylabel("Error(m/m)")
 
-    plt.figure()
-    for agent in agents:
-        times, lateness = zip(*agent.waypoint_reaching_times)
-        plt.scatter(times, lateness, c=agent.color, alpha=0.5)
-    plt.title("Lateness")
-    plt.xlabel("Time(s)")
-    plt.ylabel("Lateness to WP (s)")
+    def plot_lateness():
+        plt.figure()
+        for agent in agents:
+            times, lateness = zip(*agent.waypoint_reaching_times)
+            plt.scatter(times, lateness, c=agent.color, alpha=0.5)
+        plt.title("Lateness")
+        plt.xlabel("Time(s)")
+        plt.ylabel("Lateness to WP (s)")
 
-    ag = agents[0]
-    auv = ag._real_auv
+    def plot_err_drops():
+        plt.figure()
+        all_drops = []
+        for agent in agents:
+            times, drops = zip(*agent.position_error_drops)
+            all_drops += drops
+            plt.scatter(times, drops, c=agent.color, alpha=0.5)
+        plt.title("Error drops")
+        plt.xlabel("Time(s)")
+        plt.ylabel("Error drop(m)")
+
+    plot_errors()
+    plot_err_drops()
+
+    a = agents[0]
+    auv = a._real_auv
 
 
 

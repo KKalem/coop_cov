@@ -1,1 +1,1 @@
-vim auv.py pose_graph.py mission_plan.py auv_agent.py main.py
+vim auv_agent.py auv.py drift_model.py mission_plan.py main.py
