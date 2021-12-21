@@ -104,12 +104,11 @@ class Agent(object):
         else:
             dist = geom.euclid_distance(self.internal_auv.pose[:2], current_timed_wp.pose[:2])
             at_target = dist <= self.internal_auv.target_threshold
-            within_error_circle = dist <= current_timed_wp.uncertainty_radius_before_loop_closure
             rendezvous_happened = current_timed_wp.rendezvous_happened and\
                     current_timed_wp.idx_in_pattern in [1,3,5]
             # either at the target, or we can skip the rest of the line because
             # we basically "met in the middle" with someone else
-            if at_target or (within_error_circle and rendezvous_happened):
+            if at_target:
                 self.waypoint_reaching_times.append((self.time, self.time - current_timed_wp.time))
                 wp_time_reached = self.time >= current_timed_wp.time
                 # only skip waiting at purely rendezvous WPs, wps 2 and 4 are for lining up
@@ -378,6 +377,9 @@ if __name__ == '__main__':
     from drift_model import DriftModel
     from tqdm import tqdm
     import sys
+    from descartes import PolygonPatch
+    from shapely.ops import unary_union
+    from shapely.geometry import Polygon
 
     try:
         seed = int(sys.argv[1])
@@ -394,13 +396,15 @@ if __name__ == '__main__':
         plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
         num_agents = 3,
         swath = 50,
-        rect_width = 450,
-        rect_height = 200,
+        rect_width = 300,
+        rect_height = 600,
         speed = 1.5,
         uncertainty_accumulation_rate_k = 0.05,
         kept_uncertainty_ratio_after_loop = 1.0,
         turning_rad = 5,
-        comm_range = 50
+        comm_range = 50,
+        overlap_between_lanes = 10,
+        overlap_between_rows = 10
     )
 
     drift_model = DriftModel(
@@ -423,6 +427,31 @@ if __name__ == '__main__':
 
     for agent in agents:
         agent.visualize(ax)
+
+
+    def plot_polies():
+        all_polies = []
+        for agent in agents:
+            coverage_polies = agent._real_auv.coverage_polygon(swath = mplan.config['swath'],
+                                                               shapely=True)
+            all_polies+=coverage_polies
+
+            for poly in coverage_polies:
+                ax.add_artist(PolygonPatch(poly, alpha=0.08, fc=agent.color, ec=agent.color))
+
+        w, h = mplan.config['rect_width'], mplan.config['rect_height']
+        area_poly = Polygon(shell=[
+            (0,0),
+            (w,0),
+            (w,h),
+            (0,h),
+            (0,0)
+        ])
+        covered_poly = unary_union(all_polies)
+        uncovered_poly = area_poly - covered_poly
+        ax.add_artist(PolygonPatch(uncovered_poly, alpha=1, fc='red', ec='black'))
+
+
 
     def plot_errors():
         plt.figure()
@@ -449,6 +478,8 @@ if __name__ == '__main__':
         plt.figure()
         all_drops = []
         for agent in agents:
+            if len(agent.position_error_drops) <= 0:
+                continue
             times, drops = zip(*agent.position_error_drops)
             all_drops += drops
             plt.scatter(times, drops, c=agent.color, alpha=0.5)
@@ -456,8 +487,9 @@ if __name__ == '__main__':
         plt.xlabel("Time(s)")
         plt.ylabel("Error drop(m)")
 
-    plot_errors()
-    plot_err_drops()
+    # plot_errors()
+    # plot_err_drops()
+    plot_polies()
 
     a = agents[0]
     auv = a._real_auv

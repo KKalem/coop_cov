@@ -201,23 +201,22 @@ class AUV(object):
             if len(t) < 2:
                 continue
 
-            len_trace = len(t)
             t = np.array(t)
-            right_swath = np.array([[0,-swath/2]]*len_trace)
-            left_swath = np.array([[0,swath/2]]*len_trace)
-            left_swath = geom.vec2_rotate(left_swath, t[:,2])
-            right_swath = geom.vec2_rotate(right_swath, t[:,2])
-            left_swath[:,0] += t[:,0]
-            left_swath[:,1] += t[:,1]
-            right_swath[:,0] += t[:,0]
-            right_swath[:,1] += t[:,1]
             if not shapely:
+                len_trace = len(t)
+                right_swath = np.array([[0,-swath/2]]*len_trace)
+                left_swath = np.array([[0,swath/2]]*len_trace)
+                left_swath = geom.vec2_rotate(left_swath, t[:,2])
+                right_swath = geom.vec2_rotate(right_swath, t[:,2])
+                left_swath[:,0] += t[:,0]
+                left_swath[:,1] += t[:,1]
+                right_swath[:,0] += t[:,0]
+                right_swath[:,1] += t[:,1]
                 poly = np.vstack((right_swath, np.flip(left_swath, axis=0)))
                 polies.append(poly)
             else:
-                lines = list(zip(right_swath, left_swath))
-                mls = MultiLineString(lines)
-                poly = mls.buffer(distance = beam_radius,
+                mls = LineString(t)
+                poly = mls.buffer(distance = swath/2.,
                                   cap_style = 2)
                 polies.append(poly)
 

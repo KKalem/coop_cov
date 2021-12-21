@@ -189,7 +189,7 @@ def plan_simple_lawnmower(num_agents,
                           rect_height,
                           speed,
                           straight_slack = 1,
-                          gap_between_rows=0,
+                          overlap_between_rows=0,
                           overlap_between_lanes=0,
                           double_sided=False,
                           center_x=False,
@@ -198,14 +198,15 @@ def plan_simple_lawnmower(num_agents,
     # dubins and simple are 90 degree off from each other, im gonna take the direction of
     # the dubins planner to be the 'true' one and rotate the simple plan after its constructed
     # width determines hook_len, height determines num_hooks.
-    hook_len = (rect_width - (num_agents-1 * gap_between_rows)) / num_agents
+    # hook_len = (rect_width + (num_agents-1 * overlap_between_rows)) / num_agents
+    hook_len = (rect_width/num_agents) + overlap_between_rows/2
     num_hooks = int(rect_height / ((swath-overlap_between_lanes)*2))
 
     paths = construct_lawnmower_paths(num_agents=num_agents,
                                       num_hooks=num_hooks,
                                       hook_len=hook_len,
                                       swath=swath,
-                                      gap_between_rows=gap_between_rows,
+                                      gap_between_rows= -overlap_between_rows,
                                       overlap_between_lanes=overlap_between_lanes,
                                       double_sided=double_sided,
                                       center_x=center_x,
@@ -646,7 +647,7 @@ class MissionPlan():
                  comm_range,
                  straight_slack = 1,
                  kept_uncertainty_ratio_after_loop = 1.0,
-                 gap_between_rows = 0,
+                 overlap_between_rows = 0,
                  overlap_between_lanes = 0):
 
         # for saving later
@@ -661,7 +662,7 @@ class MissionPlan():
                        'comm_range':comm_range,
                        'straight_slack':straight_slack,
                        'kept_uncertainty_ratio_after_loop':kept_uncertainty_ratio_after_loop,
-                       'gap_between_rows':gap_between_rows,
+                       'overlap_between_rows':overlap_between_rows,
                        'overlap_between_lanes':overlap_between_lanes}
 
 
@@ -673,7 +674,7 @@ class MissionPlan():
                                                      rect_height,
                                                      speed,
                                                      straight_slack,
-                                                     gap_between_rows,
+                                                     overlap_between_rows,
                                                      overlap_between_lanes)
         elif plan_type == MissionPlan.PLAN_TYPE_DUBINS:
             self.timed_paths = plan_dubins_lawnmower(num_agents,
