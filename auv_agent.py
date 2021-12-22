@@ -3,12 +3,18 @@
 # vim:fenc=utf-8
 # Ozer Ozkahraman (ozero@kth.se)
 
+import matplotlib.pyplot as plt
+plt.rcParams['pdf.fonttype'] = 42
 import numpy as np
 import dubins
+from descartes import PolygonPatch
+from shapely.ops import unary_union
+from shapely.geometry import Polygon
 
 from toolbox import geometry as geom
 from auv import AUV
 from mission_plan import TimedWaypoint, MissionPlan
+from pose_graph import PoseGraph, PGO_VertexIdStore
 
 
 class Agent(object):
@@ -145,7 +151,7 @@ class Agent(object):
                 self.viz_plan_points.append(self.internal_auv.pose)
 
             # we have a path to follow
-            # skip the points that are too close 
+            # skip the points that are too close
             target_posi = self.current_dubins_points[0][:2]
             while geom.euclid_distance(self.internal_auv.pose[:2], self.current_dubins_points[0][:2]) <= self.internal_auv.target_threshold:
                 if len(self.current_dubins_points) > 1:
@@ -251,7 +257,7 @@ class Agent(object):
         if not recorded:
             self.connection_trace.append(False)
         else:
-            # connected to someone 
+            # connected to someone
             # mark this in the waypoint we are going to, if any
             # but only if we are close enough to the wp, to avoid marking
             # it as done due to a random other rendezvous not intended for this wp
@@ -301,6 +307,12 @@ class Agent(object):
         if len(internal_trace) > 0:
             ax.plot(internal_trace[:,0], internal_trace[:,1], alpha=0.5, linestyle=':',  c=self.color)
 
+
+        coverage_polies = self._real_auv.coverage_polygon(swath = self.mission_plan.config['swath'],
+                                                           shapely=True)
+        for poly in coverage_polies:
+            ax.add_artist(PolygonPatch(poly, alpha=0.08, fc=self.color, ec=self.color))
+
         viz_lists = [
             self.viz_plan_points,
             self.viz_optim_points
@@ -321,30 +333,61 @@ class Agent(object):
 
 
 
-def run_mission(seed, dt, mplan, drift_model):
-    np.random.seed(seed)
-    pg_id_store = PGO_VertexIdStore()
+class RunnableMission:
+    def __init__(
+        self,
+        dt,
+        seed,
+        mplan,
+        drift_model
+    ):
+        np.random.seed(seed)
+        pg_id_store = PGO_VertexIdStore()
 
-    agents = []
-    for i, timed_path in enumerate(mplan.timed_paths):
-        auv = AUV(auv_id = i,
-                  init_pos = timed_path.wps[0].pose[:2],
-                  init_heading = np.rad2deg(timed_path.wps[0].pose[2]),
-                  target_threshold = 2,
-                  forward_speed = mplan.config['speed'])
+        self.seed = seed
+        self.dt = dt
+        self.mplan = mplan
+        self.drift_model = drift_model
+        self.agents = []
 
-        pg = PoseGraph(pg_id = i,
-                       id_store = pg_id_store)
+        self.covered_poly = []
+        self.missed_poly =[]
 
-        agent = Agent(real_auv = auv,
-                      pose_graph = pg,
-                      mission_plan = mplan,
-                      drift_model = drift_model)
 
-        agents.append(agent)
 
-    step = 0
-    with tqdm(total = mplan.last_planned_time) as pbar:
+        for i, timed_path in enumerate(mplan.timed_paths):
+            auv = AUV(auv_id = i,
+                      init_pos = timed_path.wps[0].pose[:2],
+                      init_heading = np.rad2deg(timed_path.wps[0].pose[2]),
+                      target_threshold = 2,
+                      forward_speed = mplan.config['speed'])
+
+            pg = PoseGraph(pg_id = i,
+                           id_store = pg_id_store)
+
+            agent = Agent(real_auv = auv,
+                          pose_graph = pg,
+                          mission_plan = mplan,
+                          drift_model = drift_model)
+
+            self.agents.append(agent)
+
+
+    def log(self, *args):
+        if len(args) == 1:
+            args = args[0]
+        print(f'[M:{self.seed}]\t{args}')
+
+
+    def run(self):
+        step = 0
+        agents = self.agents
+        dt = self.dt
+        mplan = self.mplan
+
+        prev_print_time = time.time()
+
+        # run the agents
         while True:
             step += 1
             for agent in agents:
@@ -354,32 +397,90 @@ def run_mission(seed, dt, mplan, drift_model):
                 agent.communicate(all_agents = agents, summarize_pg = True)
 
             if mplan.is_complete:
-                print("Plan completed")
+                self.log("Plan completed")
                 break
 
             if step*dt >= mplan.last_planned_time:
-                print("Max planned time reached")
+                self.log("Max planned time reached")
                 break
 
-            pbar.update(dt)
+            elapsed = time.time() - prev_print_time
+            if elapsed > 5:
+                self.log(f"Simulated time={int(step*self.dt)}/{int(mplan.last_planned_time)}, elapsed={int(elapsed)}s")
+                prev_print_time = time.time()
 
-    return agents
+        self.log("Doing stats")
+        # and then calculate stats
+        all_polies = []
+        for agent in agents:
+            coverage_polies = agent._real_auv.coverage_polygon(swath = mplan.config['swath'],
+                                                               shapely=True)
+            all_polies += coverage_polies
 
+        w, h = mplan.config['rect_width'], mplan.config['rect_height']
+        area_poly = Polygon(shell=[
+            (0,0),
+            (w,0),
+            (w,h),
+            (0,h),
+            (0,0)
+        ])
+        self.covered_poly = unary_union(all_polies)
+        self.missed_poly = area_poly - self.covered_poly
+
+        self.log("Run complete")
+
+
+    def visualize(self, ax):
+        self.drift_model.visualize(ax, 10, rect=self.mplan.bounding_rectangle, alpha=0.2)
+        self.mplan.visualize(ax, alpha=0.2)
+        for agent in self.agents:
+            agent.visualize(ax)
+
+        ax.add_artist(PolygonPatch(self.missed_poly, alpha=1, fc='red', ec='black'))
+
+
+    def plot_errors(self):
+        plt.figure()
+        for agent in self.agents:
+            times, errs = zip(*agent.real_errors)
+            times, dists = zip(*agent.real_moved_dists)
+            distances_traveled = np.cumsum(dists)
+            errs = errs / distances_traveled
+            plt.scatter(times, errs, c=agent.color, alpha=0.5)
+        plt.title("Positioning error")
+        plt.xlabel("Time(s)")
+        plt.ylabel("Error(m/m)")
+
+    def plot_lateness(self):
+        plt.figure()
+        for agent in self.agents:
+            times, lateness = zip(*agent.waypoint_reaching_times)
+            plt.scatter(times, lateness, c=agent.color, alpha=0.5)
+        plt.title("Lateness")
+        plt.xlabel("Time(s)")
+        plt.ylabel("Lateness to WP (s)")
+
+    def plot_err_drops(self):
+        plt.figure()
+        all_drops = []
+        for agent in self.agents:
+            if len(agent.position_error_drops) <= 0:
+                continue
+            times, drops = zip(*agent.position_error_drops)
+            all_drops += drops
+            plt.scatter(times, drops, c=agent.color, alpha=0.5)
+        plt.title("Error drops")
+        plt.xlabel("Time(s)")
+        plt.ylabel("Error drop(m)")
 
 
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    plt.rcParams['pdf.fonttype'] = 42
     plt.ion()
-    from pose_graph import PoseGraph, PGO_VertexIdStore
     from drift_model import DriftModel
-    from tqdm import tqdm
     import sys
-    from descartes import PolygonPatch
-    from shapely.ops import unary_union
-    from shapely.geometry import Polygon
 
     try:
         seed = int(sys.argv[1])
@@ -389,7 +490,6 @@ if __name__ == '__main__':
         seed = int(time.time())
         print(f'Time seed={seed}')
 
-    dt = 0.05
 
     mplan = MissionPlan(
         # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
@@ -397,7 +497,7 @@ if __name__ == '__main__':
         num_agents = 3,
         swath = 50,
         rect_width = 300,
-        rect_height = 600,
+        rect_height = 300,
         speed = 1.5,
         uncertainty_accumulation_rate_k = 0.05,
         kept_uncertainty_ratio_after_loop = 1.0,
@@ -416,83 +516,19 @@ if __name__ == '__main__':
     )
 
 
-    agents = run_mission(seed, dt, mplan, drift_model)
+    mission = RunnableMission(
+        dt = 0.05,
+        seed = seed,
+        mplan = mplan,
+        drift_model = drift_model
+    )
 
+    mission.run()
 
     fig = plt.figure()
     ax = fig.add_subplot(111, aspect='equal')
+    mission.visualize(ax)
 
-    drift_model.visualize(ax, 10, rect=mplan.bounding_rectangle, alpha=0.3)
-    mplan.visualize(ax, alpha=0.5)
-
-    for agent in agents:
-        agent.visualize(ax)
-
-
-    def plot_polies():
-        all_polies = []
-        for agent in agents:
-            coverage_polies = agent._real_auv.coverage_polygon(swath = mplan.config['swath'],
-                                                               shapely=True)
-            all_polies+=coverage_polies
-
-            for poly in coverage_polies:
-                ax.add_artist(PolygonPatch(poly, alpha=0.08, fc=agent.color, ec=agent.color))
-
-        w, h = mplan.config['rect_width'], mplan.config['rect_height']
-        area_poly = Polygon(shell=[
-            (0,0),
-            (w,0),
-            (w,h),
-            (0,h),
-            (0,0)
-        ])
-        covered_poly = unary_union(all_polies)
-        uncovered_poly = area_poly - covered_poly
-        ax.add_artist(PolygonPatch(uncovered_poly, alpha=1, fc='red', ec='black'))
-
-
-
-    def plot_errors():
-        plt.figure()
-        for agent in agents:
-            times, errs = zip(*agent.real_errors)
-            times, dists = zip(*agent.real_moved_dists)
-            distances_traveled = np.cumsum(dists)
-            errs = errs / distances_traveled
-            plt.scatter(times, errs, c=agent.color, alpha=0.5)
-        plt.title("Positioning error")
-        plt.xlabel("Time(s)")
-        plt.ylabel("Error(m/m)")
-
-    def plot_lateness():
-        plt.figure()
-        for agent in agents:
-            times, lateness = zip(*agent.waypoint_reaching_times)
-            plt.scatter(times, lateness, c=agent.color, alpha=0.5)
-        plt.title("Lateness")
-        plt.xlabel("Time(s)")
-        plt.ylabel("Lateness to WP (s)")
-
-    def plot_err_drops():
-        plt.figure()
-        all_drops = []
-        for agent in agents:
-            if len(agent.position_error_drops) <= 0:
-                continue
-            times, drops = zip(*agent.position_error_drops)
-            all_drops += drops
-            plt.scatter(times, drops, c=agent.color, alpha=0.5)
-        plt.title("Error drops")
-        plt.xlabel("Time(s)")
-        plt.ylabel("Error drop(m)")
-
-    # plot_errors()
-    # plot_err_drops()
-    plot_polies()
-
-    a = agents[0]
-    auv = a._real_auv
 
 
 

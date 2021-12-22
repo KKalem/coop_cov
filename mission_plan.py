@@ -200,7 +200,7 @@ def plan_simple_lawnmower(num_agents,
     # width determines hook_len, height determines num_hooks.
     # hook_len = (rect_width + (num_agents-1 * overlap_between_rows)) / num_agents
     hook_len = (rect_width/num_agents) + overlap_between_rows/2
-    num_hooks = int(rect_height / ((swath-overlap_between_lanes)*2))
+    num_hooks = int(np.ceil((rect_height / ((swath-overlap_between_lanes)*2))))
 
     paths = construct_lawnmower_paths(num_agents=num_agents,
                                       num_hooks=num_hooks,
