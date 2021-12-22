@@ -218,6 +218,9 @@ class AUV(object):
                 mls = LineString(t)
                 poly = mls.buffer(distance = swath/2.,
                                   cap_style = 2)
+                if beam_radius > 0:
+                    poly = poly.buffer(distance = beam_radius,
+                                       cap_style = 2)
                 polies.append(poly)
 
 

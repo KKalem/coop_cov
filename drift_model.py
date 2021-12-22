@@ -68,6 +68,8 @@ class DriftModel:
                  num_ripples,
                  area_xsize,
                  area_ysize,
+                 xbias = 0,
+                 ybias = 0,
                  scale_size = 100):
 
         self.funcs = num_spirals*[spiral] + num_ripples*[ripple]
@@ -98,6 +100,8 @@ class DriftModel:
 
         self.xscales = scale_size*2*(np.random.random(num_elements)-0.5)
         self.yscales = scale_size*2*(np.random.random(num_elements)-0.5)
+        self.xbias = xbias
+        self.ybias = ybias
 
 
     def sample(self, xs, ys):
@@ -107,6 +111,8 @@ class DriftModel:
                                  self.ycenters,
                                  self.xscales,
                                  self.yscales)
+        uxs += self.xbias
+        uys += self.ybias
 
         uxs, uys, angle = normalize(uxs, uys)
 

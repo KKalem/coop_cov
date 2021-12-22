@@ -9,7 +9,7 @@ import numpy as np
 import dubins
 from descartes import PolygonPatch
 from shapely.ops import unary_union
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, Point
 
 from toolbox import geometry as geom
 from auv import AUV
@@ -350,15 +350,26 @@ class RunnableMission:
         self.drift_model = drift_model
         self.agents = []
 
+        # coverage polygons. might have holes.
         self.covered_poly = []
-        self.missed_poly =[]
+        self.missed_poly = []
+        # the length and width of the minimum bounding box of each
+        # hole in the missed poly
+        self.missed_lenwidths = []
 
-
+        # (times, errors) lists for each agent
+        self.all_translational_errs = []
+        # (times, error_drops) lists for each agent
+        self.all_error_drops = []
 
         for i, timed_path in enumerate(mplan.timed_paths):
+            init_heading = timed_path.wps[0].pose[2]
+            init_heading_vec = np.array([np.cos(init_heading), np.sin(init_heading)])
+            # start _juuuust_ a little behind to cover the very very beginning
+            init_pos = timed_path.wps[0].pose[:2] - init_heading_vec*0.5
             auv = AUV(auv_id = i,
-                      init_pos = timed_path.wps[0].pose[:2],
-                      init_heading = np.rad2deg(timed_path.wps[0].pose[2]),
+                      init_pos = init_pos,
+                      init_heading = np.rad2deg(init_heading),
                       target_threshold = 2,
                       forward_speed = mplan.config['speed'])
 
@@ -385,7 +396,7 @@ class RunnableMission:
         dt = self.dt
         mplan = self.mplan
 
-        prev_print_time = time.time()
+        prev_print_time = 0
 
         # run the agents
         while True:
@@ -409,15 +420,30 @@ class RunnableMission:
                 self.log(f"Simulated time={int(step*self.dt)}/{int(mplan.last_planned_time)}, elapsed={int(elapsed)}s")
                 prev_print_time = time.time()
 
+        self.calculate_stats()
+        self.log("Run complete")
+
+
+    def calculate_stats(self):
         self.log("Doing stats")
         # and then calculate stats
         all_polies = []
-        for agent in agents:
-            coverage_polies = agent._real_auv.coverage_polygon(swath = mplan.config['swath'],
-                                                               shapely=True)
+        for agent in self.agents:
+            coverage_polies = agent._real_auv.coverage_polygon(swath = mplan.config['swath']+1,
+                                                               shapely = True,
+                                                               beam_radius = 1.5)
             all_polies += coverage_polies
 
-        w, h = mplan.config['rect_width'], mplan.config['rect_height']
+            times, errs = zip(*agent.real_errors)
+            times, dists = zip(*agent.real_moved_dists)
+            distances_traveled = np.cumsum(dists)
+            errs = errs / (distances_traveled+0.000001)
+            self.all_translational_errs.append((times, errs))
+            if len(agent.position_error_drops) > 0:
+                times, drops = zip(*agent.position_error_drops)
+                self.all_error_drops.append((times, drops))
+
+        w, h = self.mplan.config['rect_width'], self.mplan.config['rect_height']
         area_poly = Polygon(shell=[
             (0,0),
             (w,0),
@@ -428,7 +454,24 @@ class RunnableMission:
         self.covered_poly = unary_union(all_polies)
         self.missed_poly = area_poly - self.covered_poly
 
-        self.log("Run complete")
+        def get_lenwidth(poly):
+            area = poly.area
+            rect = poly.minimum_rotated_rectangle
+            x,y = rect.exterior.coords.xy
+            edge_lens = (Point(x[0], y[0]).distance(Point(x[1], y[1])), Point(x[1], y[1]).distance(Point(x[2], y[2])))
+            rect_len = max(edge_lens)
+            rect_width = min(edge_lens)
+            return (rect_len, rect_width)
+
+
+        try:
+            hole_polies = list(self.missed_poly.geoms)
+            for poly in hole_polies:
+                self.missed_lenwidths.append(get_lenwidth(poly))
+        except:
+            self.missed_lenwidths.append(get_lenwidth(self.missed_poly))
+
+
 
 
     def visualize(self, ax):
@@ -442,37 +485,40 @@ class RunnableMission:
 
     def plot_errors(self):
         plt.figure()
-        for agent in self.agents:
-            times, errs = zip(*agent.real_errors)
-            times, dists = zip(*agent.real_moved_dists)
-            distances_traveled = np.cumsum(dists)
-            errs = errs / distances_traveled
+        for agent, (times, errs) in zip(self.agents, self.all_translational_errs):
             plt.scatter(times, errs, c=agent.color, alpha=0.5)
-        plt.title("Positioning error")
-        plt.xlabel("Time(s)")
-        plt.ylabel("Error(m/m)")
-
-    def plot_lateness(self):
-        plt.figure()
-        for agent in self.agents:
-            times, lateness = zip(*agent.waypoint_reaching_times)
-            plt.scatter(times, lateness, c=agent.color, alpha=0.5)
-        plt.title("Lateness")
-        plt.xlabel("Time(s)")
-        plt.ylabel("Lateness to WP (s)")
+        plt.title("Translational errors over time")
+        plt.xlabel("Time $[s]$")
+        plt.ylabel("Error $[m/m]$")
 
     def plot_err_drops(self):
         plt.figure()
-        all_drops = []
-        for agent in self.agents:
-            if len(agent.position_error_drops) <= 0:
-                continue
-            times, drops = zip(*agent.position_error_drops)
-            all_drops += drops
+        for agent, (times, drops) in zip(self.agents, self.all_error_drops):
             plt.scatter(times, drops, c=agent.color, alpha=0.5)
         plt.title("Error drops")
-        plt.xlabel("Time(s)")
-        plt.ylabel("Error drop(m)")
+        plt.xlabel("Time $[s]$")
+        plt.ylabel("Error drop $[m]$")
+
+
+    def plot_missed_lenwidths(self, ax=None):
+        a = np.array(self.missed_lenwidths)
+        if ax is None:
+            plt.figure()
+            plt.scatter(a[:,0], a[:,1])
+            plt.title("Length and width of missed areas")
+            plt.xlabel("Length $[m]$")
+            plt.ylabel("Width $[m]$")
+        else:
+            mission_markers = {MissionPlan.PLAN_TYPE_DUBINS:'x',
+                               MissionPlan.PLAN_TYPE_SIMPLE:'o'}
+            comm_colors = {True:'red',
+                           False:'blue'}
+
+            ax.scatter(
+                a[:,0],
+                a[:,1],
+                marker=mission_markers[self.mplan.config['plan_type']],
+                c=comm_colors[self.mplan.config['comm_range']>0])
 
 
 
@@ -492,15 +538,15 @@ if __name__ == '__main__':
 
 
     mplan = MissionPlan(
-        # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
-        plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
-        num_agents = 3,
+        plan_type = MissionPlan.PLAN_TYPE_DUBINS,
+        # plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
+        num_agents = 2,
         swath = 50,
-        rect_width = 300,
-        rect_height = 300,
+        rect_width = 200,
+        rect_height = 100,
         speed = 1.5,
         uncertainty_accumulation_rate_k = 0.05,
-        kept_uncertainty_ratio_after_loop = 1.0,
+        kept_uncertainty_ratio_after_loop = 0.5,
         turning_rad = 5,
         comm_range = 50,
         overlap_between_lanes = 10,
@@ -512,6 +558,8 @@ if __name__ == '__main__':
         num_ripples = 0,
         area_xsize = mplan.config['rect_width'],
         area_ysize = mplan.config['rect_height'],
+        xbias = 0,
+        ybias = 0,
         scale_size = 1
     )
 
@@ -528,6 +576,10 @@ if __name__ == '__main__':
     fig = plt.figure()
     ax = fig.add_subplot(111, aspect='equal')
     mission.visualize(ax)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
+    mission.plot_missed_lenwidths(ax)
 
 
 
