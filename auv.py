@@ -215,15 +215,17 @@ class AUV(object):
                 poly = np.vstack((right_swath, np.flip(left_swath, axis=0)))
                 polies.append(poly)
             else:
-                mls = LineString(t)
-                poly = mls.buffer(distance = swath/2.,
-                                  cap_style = 2)
+                split = 50
+                turning_part = LineString(t[:split+1])
+                turning_poly = turning_part.buffer(distance = swath/2., cap_style=2)
+                turning_poly = turning_poly.convex_hull
+                straight_part = LineString(t[split-1:])
+                straight_poly = straight_part.buffer(distance = swath/2., cap_style=2)
+                poly = turning_poly | straight_poly
                 if beam_radius > 0:
                     poly = poly.buffer(distance = beam_radius,
                                        cap_style = 2)
                 polies.append(poly)
-
-
 
         return polies
 

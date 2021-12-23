@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 plt.rcParams['pdf.fonttype'] = 42
 import numpy as np
 import dubins
+import time
 from descartes import PolygonPatch
 from shapely.ops import unary_union
 from shapely.geometry import Polygon, Point
@@ -397,6 +398,7 @@ class RunnableMission:
         mplan = self.mplan
 
         prev_print_time = 0
+        start_time = time.time()
 
         # run the agents
         while True:
@@ -417,7 +419,7 @@ class RunnableMission:
 
             elapsed = time.time() - prev_print_time
             if elapsed > 5:
-                self.log(f"Simulated time={int(step*self.dt)}/{int(mplan.last_planned_time)}, elapsed={int(elapsed)}s")
+                self.log(f"Simulated time={int(step*self.dt)}/{int(mplan.last_planned_time)}, elapsed={int(time.time() - start_time)}s")
                 prev_print_time = time.time()
 
         self.calculate_stats()
@@ -429,7 +431,7 @@ class RunnableMission:
         # and then calculate stats
         all_polies = []
         for agent in self.agents:
-            coverage_polies = agent._real_auv.coverage_polygon(swath = mplan.config['swath']+1,
+            coverage_polies = agent._real_auv.coverage_polygon(swath = self.mplan.config['swath']+1,
                                                                shapely = True,
                                                                beam_radius = 1.5)
             all_polies += coverage_polies
@@ -454,6 +456,7 @@ class RunnableMission:
         self.covered_poly = unary_union(all_polies)
         self.missed_poly = area_poly - self.covered_poly
 
+
         def get_lenwidth(poly):
             area = poly.area
             rect = poly.minimum_rotated_rectangle
@@ -464,12 +467,26 @@ class RunnableMission:
             return (rect_len, rect_width)
 
 
-        try:
-            hole_polies = list(self.missed_poly.geoms)
-            for poly in hole_polies:
-                self.missed_lenwidths.append(get_lenwidth(poly))
-        except:
-            self.missed_lenwidths.append(get_lenwidth(self.missed_poly))
+        if self.missed_poly.area > 0:
+            try:
+                hole_polies = list(self.missed_poly.geoms)
+                for poly in hole_polies:
+                    self.missed_lenwidths.append(get_lenwidth(poly))
+            except:
+                self.missed_lenwidths.append(get_lenwidth(self.missed_poly))
+
+        total_travel = sum([agent._real_auv.total_distance_traveled for agent in self.agents])
+        total_time = len(self.agents) * self.mplan.last_planned_time
+        final_errors = [agent.real_errors[-1] for agent in self.agents]
+
+        self.results = {
+            'missed_area':self.missed_poly.area,
+            'missed_lenwidths':self.missed_lenwidths,
+            'total_travel':total_travel,
+            'total_agent_time':total_time,
+            'final_translational_errors':final_errors
+        }
+
 
 
 
@@ -480,7 +497,8 @@ class RunnableMission:
         for agent in self.agents:
             agent.visualize(ax)
 
-        ax.add_artist(PolygonPatch(self.missed_poly, alpha=1, fc='red', ec='black'))
+        if self.missed_poly.area > 0:
+            ax.add_artist(PolygonPatch(self.missed_poly, alpha=1, fc='red', ec='black'))
 
 
     def plot_errors(self):
@@ -502,6 +520,10 @@ class RunnableMission:
 
     def plot_missed_lenwidths(self, ax=None):
         a = np.array(self.missed_lenwidths)
+        if len(a) == 0:
+            self.log("No missed area!")
+            return
+
         if ax is None:
             plt.figure()
             plt.scatter(a[:,0], a[:,1])
@@ -538,12 +560,12 @@ if __name__ == '__main__':
 
 
     mplan = MissionPlan(
-        plan_type = MissionPlan.PLAN_TYPE_DUBINS,
-        # plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
+        # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
+        plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
         num_agents = 2,
         swath = 50,
         rect_width = 200,
-        rect_height = 100,
+        rect_height = 400,
         speed = 1.5,
         uncertainty_accumulation_rate_k = 0.05,
         kept_uncertainty_ratio_after_loop = 0.5,
@@ -580,6 +602,9 @@ if __name__ == '__main__':
     fig = plt.figure()
     ax = fig.add_subplot(111, aspect='equal')
     mission.plot_missed_lenwidths(ax)
+
+
+
 
 
 

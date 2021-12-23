@@ -741,7 +741,7 @@ class MissionPlan():
         rect_height = self.config['rect_height']
 
         ax.plot([0, rect_width, rect_width,     0,                  0],
-                [0, 0,          rect_height,    rect_height,        0], c='k', alpha=alpha)
+                [0, 0,          rect_height,    rect_height,        0], c='k', alpha=1.0)
 
         for path in self.timed_paths:
             path.visualize(ax, wp_labels=False, circles=True, alpha=0.1, c='k')
