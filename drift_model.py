@@ -70,7 +70,11 @@ class DriftModel:
                  area_ysize,
                  xbias = 0,
                  ybias = 0,
-                 scale_size = 100):
+                 scale_size = 100,
+                 seed = None):
+
+        if seed is not None:
+            np.random.seed(seed)
 
         self.funcs = num_spirals*[spiral] + num_ripples*[ripple]
         self.area_xsize = area_xsize

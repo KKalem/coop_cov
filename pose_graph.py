@@ -931,7 +931,9 @@ class PoseGraph(object):
         if save:
             if self.last_optim_vert_id is None:
                 self.last_optim_vert_id = 0
-            pgo.save(f"pg_{self.pg_id}_{self.last_optim_vert_id}.g2o")
+            filename = f"pg_{self.pg_id}_{self.last_optim_vert_id}.g2o"
+            pgo.save(filename)
+            self.log(f"Saved {filename}")
 
         return pgo
 

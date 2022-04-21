@@ -11,6 +11,7 @@ import time
 from descartes import PolygonPatch
 from shapely.ops import unary_union
 from shapely.geometry import Polygon, Point
+import matplotlib.patches as pltpatches
 
 from toolbox import geometry as geom
 from auv import AUV
@@ -29,6 +30,11 @@ class Agent(object):
         # a reference to the actual physical auv
         # for ceonvenience
         self._real_auv = real_auv
+
+        # if this agents auv doesnt move, then this agent is just a landmark
+        # to be observed by other agents
+        # use this flag to save some compute
+        self.is_landmark = self._real_auv.forward_speed == 0
 
 
         self.pg = pose_graph
@@ -81,6 +87,13 @@ class Agent(object):
         self.color = Agent.COLORS[self.id%len(Agent.COLORS)]
 
 
+        # if this is a landmark, just add ONE odom pose
+        # in the beginning and dont do anything else
+        # ever again
+        if self.is_landmark:
+            self.pg.append_odom_pose(self._real_auv.apose)
+            self.log("Landmark pose appended")
+
 
     def log(self, *args):
         if len(args) == 1:
@@ -88,13 +101,19 @@ class Agent(object):
         print(f'[AGNT:{self.pg.pg_id}]\t{args}')
 
 
-    def update(self, dt, all_agents):
+    def update(self, dt, all_agents, landmarks=None):
         # update internal auv
         # apply the same control to real auv, with enviromental noise
         # measure real auv (heading?), apply onto internal auv
         # update pose graph with internal auv
 
         self.time += dt
+
+        # if this is a landmark, dont to anything, completely passive
+        # update shouldnt even be called on this, but just in case
+        if self.is_landmark:
+            return
+
 
 
         ### MISSION SYNC
@@ -169,16 +188,25 @@ class Agent(object):
         # if its a 'last', start covering
         cover = current_timed_wp.position_in_line == TimedWaypoint.LAST
 
-        # if we are alone, we will drift
+        # if we are alone
+        # and there are no landmarks in the vicinity
+        # we will drift
+        if landmarks is None:
+            landmarks = []
         alone = True
-        for agent in all_agents:
+        no_landmarks = True
+        for agent in all_agents+landmarks:
             # skip self
             if agent.pg.pg_id == self.pg.pg_id:
                 continue
             dist = geom.euclid_distance(self._real_auv.pose[:2], agent._real_auv.pose[:2])
             if dist <= self.mission_plan.config['comm_range']:
-                alone = False
-                break
+                if agent.is_landmark:
+                    no_landmarks = False
+                else:
+                    alone = False
+
+
 
         self.internal_auv.set_target(target_posi, cover=cover)
         # control real auv with what the internal one thinks
@@ -188,7 +216,7 @@ class Agent(object):
         # if we are doing coverage work, then we also drift
         moved_dist = self.internal_auv.last_moved_distance
         if cover and alone and self.drift_model is not None:
-            _,_, drift_trans_angle = drift_model.sample(self._real_auv.pos[0],
+            _,_, drift_trans_angle = drift_model.sample(self._real_auv.pose[0],
                                                         self._real_auv.pose[1])
             drift_trans_k = self.mission_plan.config['uncertainty_accumulation_rate_k']
 
@@ -214,6 +242,10 @@ class Agent(object):
 
         # compass is good
         self.internal_auv.set_heading(self._real_auv.heading)
+
+        # if within a landmark, we know where we are well
+        if not no_landmarks:
+            self.internal_auv.set_pose(self._real_auv.apose)
 
         # finally update the pose graph with the internal auv
         self.pg.append_odom_pose(self.internal_auv.apose)
@@ -245,7 +277,8 @@ class Agent(object):
                                                other_real_pose = agent._real_auv.pose,
                                                other_pg = agent.pg)
 
-                    num_vs, num_es = self.pg.fill_in_since_last_interaction(agent.pg, use_summary=summarize_pg)
+                    use_summary = summarize_pg and not agent.is_landmark
+                    num_vs, num_es = self.pg.fill_in_since_last_interaction(agent.pg, use_summary=use_summary)
                     self.received_data['verts'].append((self.time, num_vs))
                     self.received_data['edges'].append((self.time, num_es))
 
@@ -300,17 +333,28 @@ class Agent(object):
 
 
     def visualize(self, ax):
+        if self.is_landmark:
+            # if this is a landmark agent, just plot a thick X for its pos
+            x,y = self._real_auv.pos
+            ax.scatter(x,y, alpha=1.0, c='k')
+            ax.add_patch(pltpatches.Circle((x,y),
+                                           radius = self.mission_plan.config['comm_range'],
+                                           ec = 'k',
+                                           fc = 'k',
+                                           alpha=0.2))
+            return
+
         real_trace = self._real_auv.pose_trace
         if len(real_trace) > 0:
             ax.plot(real_trace[:,0], real_trace[:,1], alpha=0.8, c=self.color)
 
         internal_trace = self.internal_auv.pose_trace
         if len(internal_trace) > 0:
-            ax.plot(internal_trace[:,0], internal_trace[:,1], alpha=0.5, linestyle=':',  c=self.color)
+            ax.plot(internal_trace[:,0], internal_trace[:,1], alpha=0.5, linestyle='--',  c=self.color)
 
 
         coverage_polies = self._real_auv.coverage_polygon(swath = self.mission_plan.config['swath'],
-                                                           shapely=True)
+                                                          shapely=True)
         for poly in coverage_polies:
             ax.add_artist(PolygonPatch(poly, alpha=0.08, fc=self.color, ec=self.color))
 
@@ -343,13 +387,16 @@ class RunnableMission:
         drift_model
     ):
         np.random.seed(seed)
-        pg_id_store = PGO_VertexIdStore()
+        self.pg_id_store = PGO_VertexIdStore()
 
         self.seed = seed
         self.dt = dt
         self.mplan = mplan
         self.drift_model = drift_model
         self.agents = []
+        # landmarks are agents that dont do ANYTHING
+        # but simply exist for other agents to measure
+        self.landmarks = []
 
         # coverage polygons. might have holes.
         self.covered_poly = []
@@ -375,7 +422,7 @@ class RunnableMission:
                       forward_speed = mplan.config['speed'])
 
             pg = PoseGraph(pg_id = i,
-                           id_store = pg_id_store)
+                           id_store = self.pg_id_store)
 
             agent = Agent(real_auv = auv,
                           pose_graph = pg,
@@ -383,6 +430,28 @@ class RunnableMission:
                           drift_model = drift_model)
 
             self.agents.append(agent)
+
+
+    def add_landmarks(self, positions):
+        for i,pos in enumerate(positions):
+            ii = -i-1
+            auv = AUV(auv_id = ii,
+                      init_pos = pos,
+                      init_heading= 0,
+                      target_threshold=2,
+                      forward_speed=0)
+
+            pg = PoseGraph(pg_id = ii,
+                           id_store= self.pg_id_store)
+
+            agent = Agent(real_auv = auv,
+                          pose_graph = pg,
+                          mission_plan = mplan,
+                          drift_model = None)
+
+            self.landmarks.append(agent)
+
+
 
 
     def log(self, *args):
@@ -394,6 +463,7 @@ class RunnableMission:
     def run(self):
         step = 0
         agents = self.agents
+        landmarks = self.landmarks
         dt = self.dt
         mplan = self.mplan
 
@@ -404,10 +474,13 @@ class RunnableMission:
         while True:
             step += 1
             for agent in agents:
-                agent.update(dt = dt, all_agents = agents)
+                agent.update(dt = dt,
+                             all_agents = agents,
+                             landmarks = landmarks)
 
             for agent in agents:
-                agent.communicate(all_agents = agents, summarize_pg = True)
+                agent.communicate(all_agents = agents+landmarks,
+                                  summarize_pg = True)
 
             if mplan.is_complete:
                 self.log("Plan completed")
@@ -419,7 +492,20 @@ class RunnableMission:
 
             elapsed = time.time() - prev_print_time
             if elapsed > 5:
-                self.log(f"Simulated time={int(step*self.dt)}/{int(mplan.last_planned_time)}, elapsed={int(time.time() - start_time)}s")
+                sim_time = step*self.dt
+                elapsed = time.time() - start_time
+                if elapsed == 0:
+                    rate = '-'
+                    estimate = '-'
+                else:
+                    rate = sim_time / elapsed
+                    remaining = mplan.last_planned_time - sim_time
+                    estimate = remaining / rate
+
+                self.log(f"sim time={int(sim_time)}/{int(mplan.last_planned_time)}s "+
+                         f"real time={int(elapsed)}s "+
+                         f"rate={int(rate)}s/s "+
+                         f"real remaining={int(estimate)}s")
                 prev_print_time = time.time()
 
         self.calculate_stats()
@@ -497,6 +583,9 @@ class RunnableMission:
         for agent in self.agents:
             agent.visualize(ax)
 
+        for lm in self.landmarks:
+            lm.visualize(ax)
+
         if self.missed_poly.area > 0:
             ax.add_artist(PolygonPatch(self.missed_poly, alpha=1, fc='red', ec='black'))
 
@@ -549,12 +638,12 @@ if __name__ == '__main__':
     plt.ion()
     from drift_model import DriftModel
     import sys
+    import time
 
     try:
         seed = int(sys.argv[1])
         print(f'Given seed={seed}')
     except:
-        import time
         seed = int(time.time())
         print(f'Time seed={seed}')
 
@@ -562,12 +651,12 @@ if __name__ == '__main__':
     mplan = MissionPlan(
         # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
         plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
-        num_agents = 2,
+        num_agents = 1,
         swath = 50,
         rect_width = 200,
-        rect_height = 400,
+        rect_height = 200,
         speed = 1.5,
-        uncertainty_accumulation_rate_k = 0.05,
+        uncertainty_accumulation_rate_k = 0.15,
         kept_uncertainty_ratio_after_loop = 0.5,
         turning_rad = 5,
         comm_range = 50,
@@ -582,7 +671,8 @@ if __name__ == '__main__':
         area_ysize = mplan.config['rect_height'],
         xbias = 0,
         ybias = 0,
-        scale_size = 1
+        scale_size = 1,
+        seed = seed
     )
 
 
@@ -593,15 +683,20 @@ if __name__ == '__main__':
         drift_model = drift_model
     )
 
+
+    mission.add_landmarks([[50,50], [150,150]])
+
     mission.run()
 
     fig = plt.figure()
     ax = fig.add_subplot(111, aspect='equal')
     mission.visualize(ax)
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, aspect='equal')
-    mission.plot_missed_lenwidths(ax)
+
+
+    # fig = plt.figure()
+    # ax = fig.add_subplot(111, aspect='equal')
+    # mission.plot_missed_lenwidths(ax)
 
 
 

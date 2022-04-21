@@ -694,7 +694,7 @@ class MissionPlan():
         self.num_agents = num_agents
 
         self.last_planned_time = max( [tp.last_time for tp in self.timed_paths] )
-        print(f"Planned for {self.last_planned_time}s")
+        print(f"Planned for {int(self.last_planned_time)}s")
 
     def get_current_wp(self, auv_id):
         assert auv_id < self.num_agents, "AUV IDs should be in [0...N)"
