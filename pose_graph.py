@@ -7,6 +7,8 @@
 import numpy as np
 import g2o
 from toolbox import geometry as geom
+from matplotlib import collections as mc
+import matplotlib.pyplot as plt
 
 def make_transform(xytheta):
     x,y,theta = xytheta
@@ -225,6 +227,32 @@ class PoseGraphOptimization(g2o.SparseOptimizer):
 
         return poses
 
+    def visualize(self, ax, color=None, alpha=None):
+        verts = list(self.vertices().values())
+        fixed_pts = []
+        for v in verts:
+            if v.fixed():
+                fixed_pts.append(v.estimate().vector()[:2])
+        fixed_pts = np.array(fixed_pts)
+
+
+        edges = list(self.edges())
+        lines= []
+        for e in edges:
+            v1, v2 = e.vertices()
+            if v1 is None or v2 is None:
+                continue
+            x1,y1 = v1.estimate().vector()[:2]
+            x2,y2 = v2.estimate().vector()[:2]
+            # lines.append([(x1,x2),(y1,y2)])
+            lines.append([(x1,y1),(x2,y2)])
+
+        lc = mc.LineCollection(lines, colors=color, alpha=alpha)
+        ax.add_collection(lc)
+        if len(fixed_pts) > 0:
+            ax.scatter(fixed_pts[:,0], fixed_pts[:,1], marker='x', c=color, alpha=alpha)
+
+        # self.log(f"Num verts:{len(verts)}, edges {len(edges)}")
 
 
 
@@ -256,6 +284,8 @@ class OdomEdge(object):
         self.information = information
         # which graph do i belong to?
         self.pg_id = pg_id
+        self.has_fixed_vert = parent_vertex.fixed or child_vertex.fixed
+        self.has_vert_with_fixed_parent = parent_vertex.has_fixed_parent or child_vertex.has_fixed_parent
 
     def __repr__(self):
         return f"<OdoE:{self.edge_id}%{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
@@ -303,6 +333,8 @@ class MeasuredEdge(object):
         self.information = information
         # which graph do i belong to?
         self.pg_id = pg_id
+        self.has_fixed_vert = False
+        self.has_vert_with_fixed_parent = False
 
 
     def __repr__(self):
@@ -334,6 +366,8 @@ class SummaryEdge(object):
         self.information = information
         # which graph do i belong to?
         self.pg_id = pg_id
+        self.has_fixed_vert = parent_vertex.fixed or child_vertex.fixed
+        self.has_vert_with_fixed_parent = parent_vertex.has_fixed_parent or child_vertex.has_fixed_parent
 
     def __repr__(self):
         return f"<SummE:{self.edge_id}%{self.parent_vid}->{self.child_vid} of pg{self.pg_id}>"
@@ -377,8 +411,10 @@ class Vertex(object):
         self.fixed = fixed
         # which graph do i belong to?
         self.pg_id = pg_id
-        # list of pis that point TO this pose
+        # list of vids that point TO this pose
         self.parent_vids = []
+        # list of vids that point TO this pose and are fixed
+        self.fixed_parent_vids = []
         # that this pose points towards
         self.children_vids = []
         # edges that are shared between this pose and either a parent or a child
@@ -392,6 +428,10 @@ class Vertex(object):
     def connected_vertex_ids(self):
         return self.parent_vids + self.children_vids
 
+    @property
+    def has_fixed_parent(self):
+        return len(self.fixed_parent_vids) > 0
+
 
     def add_child(self, child_vid, edge_id):
         if child_vid not in self.connected_edge_ids.keys():
@@ -399,14 +439,19 @@ class Vertex(object):
             self.connected_edge_ids[child_vid] = edge_id
 
 
-    def add_parent(self, parent_vid, edge_id):
+    def add_parent(self, parent_vid, edge_id, parent_is_fixed=False):
         if parent_vid not in self.connected_edge_ids.keys():
             self.parent_vids.append(parent_vid)
             self.connected_edge_ids[parent_vid] = edge_id
+            if parent_is_fixed:
+                self.fixed_parent_vids.append(parent_vid)
 
 
     def update_pose(self, pose):
         self.pose = pose
+
+
+
 
 
 
@@ -437,6 +482,7 @@ class PoseGraph(object):
 
         # debugging stuff
         self._large_fill_verts = []
+        self._num_optims = 0
 
 
 
@@ -580,6 +626,7 @@ class PoseGraph(object):
                          edge_id = eid,
                          information = [1., 1., 1000.],
                          pg_id = self.pg_id)
+
             self.all_edges[eid] = e
 
             # and tell the current odom tip that it now has a new child
@@ -597,7 +644,8 @@ class PoseGraph(object):
     def measure_tip_to_tip(self,
                            self_real_pose,
                            other_real_pose,
-                           other_pg):
+                           other_pg,
+                           landmark=False):
         """
         Adds a measurement from the tip of this graph to the tip of another graph.
         The real_poses are used to create the measurement, but the vertices are used from
@@ -614,18 +662,33 @@ class PoseGraph(object):
             self.all_vertices[other_vert.vid] = other_vert
 
 
+        information = [100.,100.,1000.]
+        if landmark:
+            information = [1000000., 1000000., 1000000.]
+
         eid = self.id_store.get_new_id()
         e = MeasuredEdge(parent_vid=own_vert.vid,
                          child_vid=other_vert.vid,
                          parent_pose=self_real_pose,
                          child_pose=other_real_pose,
                          edge_id=eid,
-                         information=[100.,100.,1000.],
+                         information=information,
                          pg_id=self.pg_id)
 
-        #XXX this might break a lot of things? maybe.
-        own_vert.add_child(other_vert.vid, eid)
-        other_vert.add_parent(own_vert.vid, eid)
+        e.has_vert_with_fixed_parent = own_vert.has_fixed_parent or other_vert.has_fixed_parent
+
+        if not landmark:
+            # if not a landmark, then the parent is THIS.
+            # basically WE measured THEM
+            own_vert.add_child(other_vert.vid, eid)
+            other_vert.add_parent(own_vert.vid, eid)
+        else:
+            # if the agent IS a landmark, then
+            # we want the landmark to be the parent
+            # so that the flow of edges is always from a fixed vertex
+            own_vert.add_parent(other_vert.vid, eid, parent_is_fixed=True)
+            other_vert.add_child(own_vert.vid, eid)
+            e.has_fixed_vert = True
 
         self.all_edges[eid] = e
 
@@ -666,7 +729,17 @@ class PoseGraph(object):
                 complete = True
                 break
 
-            parents = vertex.parent_vids
+            if vertex.fixed:
+                # reached a fixed vertex, no point in following further
+                complete = True
+                break
+
+            # use the fixed parents if any
+            if len(vertex.fixed_parent_vids) > 0:
+                parents = vertex.fixed_parent_vids
+            else:
+                parents = vertex.parent_vids
+
             next_vertex = None
             for parent_vid in parents:
                 # out of all the parents (there might be many)
@@ -675,18 +748,20 @@ class PoseGraph(object):
                 if parent is None:
                     # self.log("Parent is none")
                     continue
+                # skip verts that are not _mine_
+                # but dont skip them if they are a landmark (id < 0)
+                if parent.pg_id != self.pg_id and parent.pg_id >= 0:
+                    continue
 
-                if parent.pg_id == self.pg_id:
-                    eid_to_parent = vertex.connected_edge_ids.get(parent_vid)
-                    edge_to_parent = self.all_edges.get(eid_to_parent)
-                    next_vertex = parent
-                    edges[eid_to_parent] = edge_to_parent
-                    if use_summary and type(edge_to_parent) == SummaryEdge:
-                        # self.log(f"Jumped with summary edge from {vertex.vid} to {parent.vid}")
-                        # early stop to make sure the last "next_vertex" is the one
-                        # we got to through a summary edge
-                        break
-
+                eid_to_parent = vertex.connected_edge_ids.get(parent_vid)
+                edge_to_parent = self.all_edges.get(eid_to_parent)
+                next_vertex = parent
+                edges[eid_to_parent] = edge_to_parent
+                if use_summary and type(edge_to_parent) == SummaryEdge:
+                    # self.log(f"Jumped with summary edge from {vertex.vid} to {parent.vid}")
+                    # early stop to make sure the last "next_vertex" is the one
+                    # we got to through a summary edge
+                    break
 
             # if we did find a parent, keep following that
             vertex = next_vertex
@@ -910,22 +985,42 @@ class PoseGraph(object):
         # the optimizer object
         pgo = PoseGraphOptimization(pgo_id = self.pg_id)
         # add all the vertices
+        viz_pts = []
+        viz_fixed = []
+        viz_ownership = []
         for vid, vert in self.all_vertices.items():
             if vid >= start_from:
                 pgo.add_vertex(v_id = vid,
                                pose = vert.pose,
                                fixed = vert.fixed)
 
+                viz_pts.append(vert.pose)
+                viz_fixed.append(vert.fixed)
+                viz_ownership.append(vert.pg_id == self.pg_id)
+
+
         # add all the edges
         for eid, edge in self.all_edges.items():
             if eid >= start_from:
                 # depending on if we want to optimize over the full graph
                 # or the summarized graph, but never BOTH
+
+                # if the edge has a fixed vert in it, always include it.
+                # or if it has a vertex that is connected to a fixed vert
+                if edge.has_fixed_vert or edge.has_vert_with_fixed_parent:
+                    pgo.add_edge(**edge.as_dict)
+                    continue
+
+                # USE the summary edge if its there
                 if use_summary and type(edge) in (SummaryEdge, MeasuredEdge):
                     pgo.add_edge(**edge.as_dict)
+                    continue
 
+                # use odom edges instead
                 if not use_summary and type(edge) in (MeasuredEdge, OdomEdge):
                     pgo.add_edge(**edge.as_dict)
+                    continue
+
 
 
         if save:
@@ -940,7 +1035,7 @@ class PoseGraph(object):
 
 
 
-    def optimize(self, use_summary=False, save_before=False):
+    def optimize(self, use_summary=False, save_before=False, start_from=None):
         # first, out of our own graph, construct a PGO
         # using vertices that go until the previous optimized tip
         # optimize the PGO
@@ -952,29 +1047,66 @@ class PoseGraph(object):
             # this handles the tips being equal already
             self.summarize_to_tip()
 
-        pgo = self.make_pgo(use_summary=use_summary, save=save_before, start_from=self.last_optim_vert_id)
+        if start_from is None:
+            start_from = self.last_optim_vert_id
+
+        pgo = self.make_pgo(use_summary=use_summary, save=save_before, start_from=start_from)
+
+        # TODO XX123XX
+        # filename = f"pg_{self.pg_id}_{self._num_optims}"
+        # fig = plt.figure()
+        # ax = fig.add_subplot(111, aspect='equal')
+        # pgo.visualize(ax, color='b', alpha=0.4)
+        # pgo.save(filename + '.g2o')
 
         success = pgo.optimize(max_iterations=100)
 
+        # TODO XX123XX
+        # pgo.visualize(ax, color='r', alpha=0.4)
+        # plt.savefig(filename + '.png')
+        # plt.close(fig)
+
+
         if not success:
             self.log(f"Optim failed at v:{self.last_optim_vert_id}")
-            return success
+            return success, None
 
-        # update our own vertices from the pgo
-        for vid in pgo.vertices():
-            new_pose = pgo.get_pose_array(vid)
-            self.all_vertices[vid].update_pose(new_pose)
-
+        # get the most recent corrected pose to return it
+        corrected_tip_pose = pgo.get_pose_array(self.odom_tip_vertex.vid)
 
         self.last_optim_vert_id = self.odom_tip_vertex.vid
         # self.all_vertices[self.last_optim_vert_id].fixed = True
 
-        return success
+        self._num_optims += 1
+
+        return success, corrected_tip_pose
 
 
 
 
 
+
+"""
+if __name__=='__main__':
+    import matplotlib.pyplot as plt
+
+    try:
+        __IPYTHON__
+        plt.ion()
+    except:
+        pass
+
+    pgo = PoseGraphOptimization(pgo_id=0)
+    # pgo.load("pg_0_18302.g2o")
+    pgo.load("pg_0_40494.g2o")
+    # pgo.load("pg_1_34664.g2o")
+
+
+    fig, ax = plt.subplots()
+    ax.autoscale()
+    pgo.visualize(ax, alpha=0.5)
+    pgo.optimize()
+    pgo.visualize(ax, color='r', alpha=0.5)
 
 
 
@@ -1139,6 +1271,5 @@ if __name__=='__main__':
 
 
     print('Done plotting')
-
-
+"""
 

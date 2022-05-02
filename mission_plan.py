@@ -643,8 +643,10 @@ class MissionPlan():
                  rect_height,
                  speed,
                  uncertainty_accumulation_rate_k,
+                 heading_noise_degrees,
                  turning_rad,
                  comm_range,
+                 landmark_range,
                  straight_slack = 1,
                  kept_uncertainty_ratio_after_loop = 1.0,
                  overlap_between_rows = 0,
@@ -658,8 +660,10 @@ class MissionPlan():
                        'rect_height':rect_height,
                        'speed':speed,
                        'uncertainty_accumulation_rate_k':uncertainty_accumulation_rate_k,
+                       'heading_noise_degrees':heading_noise_degrees,
                        'turning_rad':turning_rad,
                        'comm_range':comm_range,
+                       'landmark_range':landmark_range,
                        'straight_slack':straight_slack,
                        'kept_uncertainty_ratio_after_loop':kept_uncertainty_ratio_after_loop,
                        'overlap_between_rows':overlap_between_rows,
@@ -762,9 +766,11 @@ if __name__=='__main__':
         rect_height = 200,
         speed = 1.5,
         uncertainty_accumulation_rate_k = 0.05,
+        heading_noise_degrees = 10,
         kept_uncertainty_ratio_after_loop = 0.8,
         turning_rad = 5,
-        comm_range = 10
+        comm_range = 10,
+        landmark_range = 10
     )
 
     fig = plt.figure()

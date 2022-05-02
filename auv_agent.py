@@ -200,7 +200,12 @@ class Agent(object):
             if agent.pg.pg_id == self.pg.pg_id:
                 continue
             dist = geom.euclid_distance(self._real_auv.pose[:2], agent._real_auv.pose[:2])
-            if dist <= self.mission_plan.config['comm_range']:
+
+            lim = self.mission_plan.config['comm_range']
+            if agent.is_landmark:
+                lim = self.mission_plan.config['landmark_range']
+
+            if dist <= lim:
                 if agent.is_landmark:
                     no_landmarks = False
                 else:
@@ -226,9 +231,16 @@ class Agent(object):
             drift_mag = moved_dist * drift_trans_k
             drift_x = drift_mag * np.cos(drift_trans_angle)
             drift_y = drift_mag * np.sin(drift_trans_angle)
+
+            # add some heading drifting too
+            degree_lim = self.mission_plan.config['heading_noise_degrees']
+            heading_noise = np.deg2rad((np.random.random()*2 -1)*degree_lim)
         else:
             drift_x = 0
             drift_y = 0
+            heading_noise = 0
+
+
 
         # and then finally update the real auv with the desired
         # motion from the internal auv and the drift that would cause
@@ -240,8 +252,9 @@ class Agent(object):
                               drift_heading = 0.,
                               cover = cover)
 
-        # compass is good
-        self.internal_auv.set_heading(self._real_auv.heading)
+
+        # compass is not _perfect_, but assume so when theres another auv nearby
+        self.internal_auv.set_heading(self._real_auv.heading + heading_noise)
 
         # if within a landmark, we know where we are well
         if not no_landmarks:
@@ -263,22 +276,30 @@ class Agent(object):
 
         recorded = False
         comm_dist = self.mission_plan.config['comm_range']
+        lm_dist = self.mission_plan.config['landmark_range']
 
         # quick exit if we are not planned to communicate at all
         if comm_dist > 0:
             for agent in all_agents:
                 # skip self
-                if agent.pg.pg_id == self.pg.pg_id:
+                if agent.id == self.id:
                     continue
 
+                lim = comm_dist
+                if agent.is_landmark:
+                    lim = lm_dist
+
                 dist = geom.euclid_distance(self._real_auv.pose[:2], agent._real_auv.pose[:2])
-                if dist <= comm_dist:
+                if dist <= lim:
                     self.pg.measure_tip_to_tip(self_real_pose = self._real_auv.pose,
                                                other_real_pose = agent._real_auv.pose,
-                                               other_pg = agent.pg)
+                                               other_pg = agent.pg,
+                                               landmark = agent.is_landmark)
 
                     use_summary = summarize_pg and not agent.is_landmark
                     num_vs, num_es = self.pg.fill_in_since_last_interaction(agent.pg, use_summary=use_summary)
+                    if num_vs > 2:
+                        self.log(f"Got {num_vs} verts from {agent.id}")
                     self.received_data['verts'].append((self.time, num_vs))
                     self.received_data['edges'].append((self.time, num_es))
 
@@ -305,16 +326,16 @@ class Agent(object):
         # if the connection status has changed, optimize the pose graph etc.
         if len(self.connection_trace) > 2:
             if self.connection_trace[-1] != self.connection_trace[-2]:
-                success = self.pg.optimize(use_summary=summarize_pg, save_before=False)
+                success, corrected_current_pose = self.pg.optimize(use_summary=summarize_pg, save_before=False)
                 if success:
-                    err_before = self.distance_traveled_error(just_error=True)
-                    self.internal_auv.set_pose(self.pg.odom_tip_vertex.pose)
+                    correction_vec = self.internal_auv.apose[:2] - corrected_current_pose[:2]
+                    # self.log(f"Pose correction={correction_vec}")
+
+                    self.internal_auv.set_pose(corrected_current_pose)
+
                     self.viz_optim_points.append(self.internal_auv.pose)
                     # we should re-plan next update with the correcter est.
                     self.current_dubins_points = []
-                    err_after = self.distance_traveled_error(just_error=True)
-                    err_drop = err_before - err_after
-                    self.position_error_drops.append((self.time, err_drop))
 
 
 
@@ -338,10 +359,12 @@ class Agent(object):
             x,y = self._real_auv.pos
             ax.scatter(x,y, alpha=1.0, c='k')
             ax.add_patch(pltpatches.Circle((x,y),
-                                           radius = self.mission_plan.config['comm_range'],
+                                           radius = self.mission_plan.config['landmark_range'],
                                            ec = 'k',
                                            fc = 'k',
-                                           alpha=0.2))
+                                           alpha=0.2,
+                                           hatch='x',
+                                           fill=False))
             return
 
         real_trace = self._real_auv.pose_trace
@@ -384,7 +407,8 @@ class RunnableMission:
         dt,
         seed,
         mplan,
-        drift_model
+        drift_model,
+        use_summary = True
     ):
         np.random.seed(seed)
         self.pg_id_store = PGO_VertexIdStore()
@@ -410,6 +434,9 @@ class RunnableMission:
         # (times, error_drops) lists for each agent
         self.all_error_drops = []
 
+        # enable or disable pose graph summarization for the mission
+        self.use_summary = use_summary
+
         for i, timed_path in enumerate(mplan.timed_paths):
             init_heading = timed_path.wps[0].pose[2]
             init_heading_vec = np.array([np.cos(init_heading), np.sin(init_heading)])
@@ -434,7 +461,10 @@ class RunnableMission:
 
     def add_landmarks(self, positions):
         for i,pos in enumerate(positions):
+            # negative ids for landmark agents
             ii = -i-1
+            # a landmark is literally an agent that never moves
+            # or does ANYTHING
             auv = AUV(auv_id = ii,
                       init_pos = pos,
                       init_heading= 0,
@@ -480,7 +510,7 @@ class RunnableMission:
 
             for agent in agents:
                 agent.communicate(all_agents = agents+landmarks,
-                                  summarize_pg = True)
+                                  summarize_pg = self.use_summary)
 
             if mplan.is_complete:
                 self.log("Plan completed")
@@ -505,7 +535,7 @@ class RunnableMission:
                 self.log(f"sim time={int(sim_time)}/{int(mplan.last_planned_time)}s "+
                          f"real time={int(elapsed)}s "+
                          f"rate={int(rate)}s/s "+
-                         f"real remaining={int(estimate)}s")
+                         f"estimated remaining={int(estimate)}s")
                 prev_print_time = time.time()
 
         self.calculate_stats()
@@ -547,7 +577,9 @@ class RunnableMission:
             area = poly.area
             rect = poly.minimum_rotated_rectangle
             x,y = rect.exterior.coords.xy
-            edge_lens = (Point(x[0], y[0]).distance(Point(x[1], y[1])), Point(x[1], y[1]).distance(Point(x[2], y[2])))
+            len01 = Point(x[0], y[0]).distance(Point(x[1], y[1]))
+            len12 = Point(x[1], y[1]).distance(Point(x[2], y[2]))
+            edge_lens = (len01, len12)
             rect_len = max(edge_lens)
             rect_width = min(edge_lens)
             return (rect_len, rect_width)
@@ -651,17 +683,19 @@ if __name__ == '__main__':
     mplan = MissionPlan(
         # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
         plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
-        num_agents = 1,
-        swath = 50,
-        rect_width = 200,
-        rect_height = 200,
+        num_agents = 2,
+        swath = 25,
+        rect_width = 100,
+        rect_height = 100,
         speed = 1.5,
-        uncertainty_accumulation_rate_k = 0.15,
+        uncertainty_accumulation_rate_k = 0.1,
         kept_uncertainty_ratio_after_loop = 0.5,
+        heading_noise_degrees = 10,
         turning_rad = 5,
-        comm_range = 50,
-        overlap_between_lanes = 10,
-        overlap_between_rows = 10
+        comm_range = 25,
+        landmark_range = 10,
+        overlap_between_lanes = 5,
+        overlap_between_rows = 5
     )
 
     drift_model = DriftModel(
@@ -680,11 +714,12 @@ if __name__ == '__main__':
         dt = 0.05,
         seed = seed,
         mplan = mplan,
-        drift_model = drift_model
+        drift_model = drift_model,
+        use_summary = True
     )
 
 
-    mission.add_landmarks([[50,50], [150,150]])
+    mission.add_landmarks([[80,60], [20,60]])
 
     mission.run()
 
@@ -692,11 +727,21 @@ if __name__ == '__main__':
     ax = fig.add_subplot(111, aspect='equal')
     mission.visualize(ax)
 
+    # a = mission.agents[0]
+    # pgo = a.pg.make_pgo()
+    # pgo.optimize()
+    # pgo.visualize(ax, color='purple', alpha=0.3)
+
+    # a = mission.agents[1]
+    # pgo = a.pg.make_pgo()
+    # pgo.optimize()
+    # pgo.visualize(ax, color='cyan', alpha=0.3)
 
 
     # fig = plt.figure()
     # ax = fig.add_subplot(111, aspect='equal')
     # mission.plot_missed_lenwidths(ax)
+
 
 
 
