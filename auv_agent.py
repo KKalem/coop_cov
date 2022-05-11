@@ -92,7 +92,7 @@ class Agent(object):
         # ever again
         if self.is_landmark:
             self.pg.append_odom_pose(self._real_auv.apose)
-            self.log("Landmark pose appended")
+            # self.log("Landmark pose appended")
 
 
     def log(self, *args):
@@ -221,8 +221,8 @@ class Agent(object):
         # if we are doing coverage work, then we also drift
         moved_dist = self.internal_auv.last_moved_distance
         if cover and alone and self.drift_model is not None:
-            _,_, drift_trans_angle = drift_model.sample(self._real_auv.pose[0],
-                                                        self._real_auv.pose[1])
+            _,_, drift_trans_angle = self.drift_model.sample(self._real_auv.pose[0],
+                                                             self._real_auv.pose[1])
             drift_trans_k = self.mission_plan.config['uncertainty_accumulation_rate_k']
 
             # if doing coverage, use the given drift model
@@ -298,8 +298,8 @@ class Agent(object):
 
                     use_summary = summarize_pg and not agent.is_landmark
                     num_vs, num_es = self.pg.fill_in_since_last_interaction(agent.pg, use_summary=use_summary)
-                    if num_vs > 2:
-                        self.log(f"Got {num_vs} verts from {agent.id}")
+                    # if num_vs > 2:
+                        # self.log(f"Got {num_vs} verts from {agent.id}")
                     self.received_data['verts'].append((self.time, num_vs))
                     self.received_data['edges'].append((self.time, num_es))
 
@@ -476,7 +476,7 @@ class RunnableMission:
 
             agent = Agent(real_auv = auv,
                           pose_graph = pg,
-                          mission_plan = mplan,
+                          mission_plan = self.mplan,
                           drift_model = None)
 
             self.landmarks.append(agent)
@@ -595,13 +595,17 @@ class RunnableMission:
 
         total_travel = sum([agent._real_auv.total_distance_traveled for agent in self.agents])
         total_time = len(self.agents) * self.mplan.last_planned_time
-        final_errors = [agent.real_errors[-1] for agent in self.agents]
+        final_errors = [float(agent.real_errors[-1][1]) for agent in self.agents]
 
         self.results = {
             'missed_area':self.missed_poly.area,
-            'missed_lenwidths':self.missed_lenwidths,
-            'total_travel':total_travel,
-            'total_agent_time':total_time,
+            'total_covered_area':self.covered_poly.area,
+            'intended_covered_area': area_poly.area - self.missed_poly.area,
+            'intended_area':area_poly.area,
+            'plan_is_complete':self.mplan.complete_plan,
+            'missed_lenwidths':[list(mlw) for mlw in self.missed_lenwidths],
+            'total_travel':float(total_travel),
+            'total_agent_time':float(total_time),
             'final_translational_errors':final_errors
         }
 
@@ -681,8 +685,8 @@ if __name__ == '__main__':
 
 
     mplan = MissionPlan(
-        # plan_type = MissionPlan.PLAN_TYPE_DUBINS,
-        plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
+        plan_type = MissionPlan.PLAN_TYPE_DUBINS,
+        # plan_type = MissionPlan.PLAN_TYPE_SIMPLE,
         num_agents = 2,
         swath = 25,
         rect_width = 100,

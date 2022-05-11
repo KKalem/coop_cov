@@ -1001,7 +1001,7 @@ class PoseGraph(object):
 
         # add all the edges
         for eid, edge in self.all_edges.items():
-            if eid >= start_from:
+            if eid >= start_from and edge is not None:
                 # depending on if we want to optimize over the full graph
                 # or the summarized graph, but never BOTH
 

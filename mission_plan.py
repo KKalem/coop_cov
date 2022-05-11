@@ -400,14 +400,14 @@ def plan_dubins_lawnmower(num_agents,
     # every other path should be flipped around the y axis
     single_width = rect_width / num_agents
     # these are all the same, at this point
-    timed_paths = [construct_dubins_path(swath,
-                                         single_width,
-                                         rect_height,
-                                         speed,
-                                         k,
-                                         turning_rad,
-                                         straight_slack,
-                                         kept_uncertainty_ratio_after_loop) for i in range(num_agents)]
+    timed_paths, completes = zip(*[construct_dubins_path(swath,
+                                                         single_width,
+                                                         rect_height,
+                                                         speed,
+                                                         k,
+                                                         turning_rad,
+                                                         straight_slack,
+                                                         kept_uncertainty_ratio_after_loop) for i in range(num_agents)])
 
     for i, path in enumerate(timed_paths):
         # flip'em around y
@@ -419,7 +419,7 @@ def plan_dubins_lawnmower(num_agents,
         path.transpose(dx, 0)
 
 
-    return timed_paths
+    return timed_paths, all(completes)
 
 
 def construct_dubins_path(swath,
@@ -621,12 +621,10 @@ def construct_dubins_path(swath,
 
         s_old = s_new
 
+    # if not filled_rect:
+        # print("Plan is incomplete!")
 
-
-    if not filled_rect:
-        print("Plan is incomplete!")
-
-    return path
+    return path, filled_rect
 
 
 
@@ -680,16 +678,18 @@ class MissionPlan():
                                                      straight_slack,
                                                      overlap_between_rows,
                                                      overlap_between_lanes)
+            self.complete_plan = True
+
         elif plan_type == MissionPlan.PLAN_TYPE_DUBINS:
-            self.timed_paths = plan_dubins_lawnmower(num_agents,
-                                                     swath,
-                                                     rect_width,
-                                                     rect_height,
-                                                     speed,
-                                                     uncertainty_accumulation_rate_k,
-                                                     turning_rad,
-                                                     straight_slack,
-                                                     kept_uncertainty_ratio_after_loop)
+            self.timed_paths, self.complete_plan = plan_dubins_lawnmower(num_agents,
+                                                                         swath,
+                                                                         rect_width,
+                                                                         rect_height,
+                                                                         speed,
+                                                                         uncertainty_accumulation_rate_k,
+                                                                         turning_rad,
+                                                                         straight_slack,
+                                                                         kept_uncertainty_ratio_after_loop)
         else:
             assert False, "Unknown plan type!"
 
