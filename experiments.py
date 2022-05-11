@@ -151,20 +151,28 @@ if __name__ == '__main__':
     except:
         pass
 
-    seeds = np.random.randint(0,100000,25)
+    # seeds = np.random.randint(0,100000,25)
     # seeds = np.random.randint(0,100000,2)
+    # seeds used in the previous batch for comm_range=50.
+    # initially randomly selected with above
+    seeds = [6722, 12565, 17368, 19998, 30095, 30311, 32014,
+             39063, 40507, 41451, 44693, 49771, 51286, 60028, 72701,
+             72998, 77084, 79373, 80817, 81332, 94483, 94925, 95033,
+             98081, 99982]
     sides = [100, 600, 1200]
     # sides = [100, 600]
-    nums_agents = [1, 3, 6]
-    # nums_agents = [3, 6]
+    # nums_agents = [1, 3, 6]
+    nums_agents = [3, 6]
     ks = [0.01, 0.05, 0.1]
     # ks = [0.05, 0.1]
     plan_types = [MissionPlan.PLAN_TYPE_SIMPLE, MissionPlan.PLAN_TYPE_DUBINS]
     # plan_types = [MissionPlan.PLAN_TYPE_DUBINS]
     # kept_uncertainties = [0.25, 0.5, 0.75, 1.0]
-    kept_uncertainties = [0.25, 0.5, 1.0]
+    # kept_uncertainties = [0.25, 0.5, 1.0]
+    kept_uncertainties = [1.0]
     # nums_landmarks = [0, 1, 5]
-    nums_landmarks = [0, 1]
+    # nums_landmarks = [0, 1]
+    nums_landmarks = [0]
 
 
     exps = []
@@ -179,6 +187,7 @@ if __name__ == '__main__':
                                 for kept_uncertainty in kept_uncertainties:
                                     for seed in seeds:
                                         e = Experiment(seed = seed,
+                                                       comm_range = 0,
                                                        num_agents = num_agents,
                                                        num_landmarks = num_landmarks,
                                                        plan_type = plan_type,
@@ -191,6 +200,7 @@ if __name__ == '__main__':
                             else:
                                 for seed in seeds:
                                         e = Experiment(seed = seed,
+                                                       comm_range = 0,
                                                        num_agents = num_agents,
                                                        num_landmarks = num_landmarks,
                                                        plan_type = plan_type,

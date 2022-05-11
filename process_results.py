@@ -66,7 +66,7 @@ plt.ion()
 plt.figure()
 num_agents = 6
 
-x_col = 'intended_area'
+x_col = 'intended_covered_area'
 d = exps.query(f'plan_type == 0 & num_agents == {num_agents}')
 plt.scatter(d[x_col], efficiencies(d), alpha=0.1, label=f'simple', marker='x')
 
